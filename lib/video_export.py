@@ -154,13 +154,18 @@ def write_frames_to_mp4(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        assert proc.stdin is not None
+        # Feed frames through communicate(input=...): it writes stdin, closes
+        # it, and drains stdout/stderr in one step. Manually closing stdin and
+        # *then* calling communicate() makes communicate() flush an
+        # already-closed file, which raises "ValueError: flush of closed file"
+        # on Python 3.12 (subprocess only swallows BrokenPipeError there). That
+        # exception was caught upstream, so every segment mp4 export silently
+        # produced no file while ffmpeg had actually encoded it fine.
         try:
-            proc.stdin.write(rgb.tobytes())
-            proc.stdin.close()
+            stdout, stderr = proc.communicate(input=rgb.tobytes())
         except BrokenPipeError:
-            pass
-        stdout, stderr = proc.communicate()
+            # ffmpeg exited early; drain whatever it left on the pipes.
+            stdout, stderr = proc.communicate()
         if proc.returncode != 0 or not tmp_mp4.is_file() or tmp_mp4.stat().st_size <= 0:
             err = (stderr or b"").decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"ffmpeg encode failed (code={proc.returncode}): {err or 'unknown'}")
