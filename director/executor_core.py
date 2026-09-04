@@ -98,13 +98,13 @@ _MEM_TRACE = os.environ.get("MINIMAX_DIRECTOR_MEM_TRACE", "").strip().lower() in
 }
 
 
-# 「全部导出」(merge) streams finished segments to the disk cache and frees their
-# RAM pixels during the loop, reloading them once at concat. Bounds peak RAM to
-# ~1 merged timeline instead of growing with the segment count. Opt-in: the
-# default path still holds every segment in RAM exactly as before.
-_STREAM_MERGE = os.environ.get("MINIMAX_DIRECTOR_STREAM_MERGE", "").strip().lower() in {
-    "1", "true", "on", "yes",
-}
+# 「全部导出」(merge) can stream finished segments to the disk cache and free their
+# RAM pixels during the loop, reloading them once at concat — bounding peak RAM to
+# ~1 merged timeline instead of growing with the segment count. Controlled by the
+# Director UI「合并方式」widget (plan.merge_method, default "stream"). The legacy
+# MINIMAX_DIRECTOR_STREAM_MERGE env var, when explicitly set, overrides the widget
+# (headless / power users): 1/true/on/yes forces stream, 0/false/off/no forces classic.
+_STREAM_MERGE_ENV = os.environ.get("MINIMAX_DIRECTOR_STREAM_MERGE", "").strip().lower()
 
 
 def _mem_rss_mb() -> float:
@@ -487,14 +487,23 @@ def _release_segment_pixels(
 def _stream_merge_enabled(plan: DirectorPlan, node_id: str | None) -> bool:
     """True when「全部导出」should stream finished segments through the disk cache.
 
-    Opt-in via MINIMAX_DIRECTOR_STREAM_MERGE; only merge mode with 2+ segments
-    (so every segment is already written to the cache by _segment_disk_cache_needed).
+    Driven by the UI「合并方式」widget (plan.merge_method, default "stream"); only
+    merge mode with 2+ segments (so every segment is already written to the cache
+    by _segment_disk_cache_needed). The legacy MINIMAX_DIRECTOR_STREAM_MERGE env
+    var overrides the widget when explicitly set (headless / power users).
     """
-    if not _STREAM_MERGE or not node_id:
+    if not node_id:
         return False
     if getattr(plan, "export_mode", "") != "all":
         return False
-    return len(getattr(plan, "segments", None) or []) >= 2
+    if len(getattr(plan, "segments", None) or []) < 2:
+        return False
+    if _STREAM_MERGE_ENV in {"1", "true", "on", "yes"}:
+        return True
+    if _STREAM_MERGE_ENV in {"0", "false", "off", "no"}:
+        return False
+    method = str(getattr(plan, "merge_method", "stream") or "stream").strip().lower()
+    return method in {"stream", "streaming", "流式", "流式导出"}
 
 
 def _release_merge_pixels(
@@ -743,13 +752,23 @@ def execute_director_plan_core(
     export_segments_mode = plan.export_mode == "segments"
     # 「全部导出」streaming merge: free each finished segment's RAM pixels (they
     # are already on disk) and reload them once at concat. Bounds peak RAM to ~1
-    # merged timeline instead of growing with the group count. Default OFF.
+    # merged timeline instead of growing with the group count. Controlled by the
+    # UI「合并方式」widget (plan.merge_method, default 流式导出); env var overrides.
     stream_merge_active = _stream_merge_enabled(plan, node_id) and not export_segments_mode
     stream_released: set[int] = set()
     seg_by_index: dict[int, SegmentPlan] = {int(s.index): s for s in all_segments}
+    if not export_segments_mode and getattr(plan, "export_mode", "") == "all":
+        # Surface the decision in the console log (not just the report output),
+        # so「合并方式」is visible where users actually watch during a run.
+        log.info(
+            "MiniMax H3 Director「全部导出」合并方式=%s（%d 段，流式合并%s）",
+            "流式导出" if getattr(plan, "merge_method", "stream") == "stream" else "普通导出",
+            len(getattr(plan, "segments", None) or []),
+            "已启用" if stream_merge_active else "未启用",
+        )
     if stream_merge_active:
         reports.append(
-            "内存优化：「全部导出」流式合并已启用（MINIMAX_DIRECTOR_STREAM_MERGE）——"
+            "内存优化：「全部导出」流式合并已启用（合并方式=流式导出）——"
             "每段落盘验证后即释放 RAM 像素、拼接时逐段流式重载，"
             "峰值≈1×整片而非随提示词组数线性增长（重载失败自动回退到整片常驻）。"
         )

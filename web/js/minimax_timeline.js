@@ -1841,7 +1841,7 @@ function parseTimeline(raw, totalFrames, fps) {
             megapixels: DEFAULT_MEGAPIXELS,
             multiple: MINIMAX_CANVAS_MULTIPLE,
             longEdge: 848, width: 848, height: 480,
-            maxExportFrames: 0, exportMode: "all",
+            maxExportFrames: 0, exportMode: "all", mergeMethod: "stream",
             audioMode: "generate",
             exportSourceImages: false,
             refImageSize: "match",
@@ -2837,6 +2837,13 @@ class MiniMaxH3DirectorEditor {
                 <option value="all" data-i18n="output.exportMode.all">全部导出</option>
                 <option value="segments" data-i18n="output.exportMode.segments">分段导出</option>
             </select>
+            <span class="hidden" data-r="out-merge-method-wrap" hidden aria-hidden="true">
+                <label data-i18n="output.mergeMethod.label" data-i18n-title="tooltip.mergeMethod">合并方式</label>
+                <select class="bd-select" data-r="out-merge-method" data-i18n-title="tooltip.mergeMethod">
+                    <option value="stream" data-i18n="output.mergeMethod.stream">流式导出</option>
+                    <option value="classic" data-i18n="output.mergeMethod.classic">普通导出</option>
+                </select>
+            </span>
             <span class="hidden" data-r="out-max-frames-wrap" hidden aria-hidden="true">
                 <label data-i18n="output.maxFrames">最大帧数</label>
                 <input type="number" class="bd-num" data-r="out-max-frames" min="0" max="999999" step="1" value="0" style="width:64px">
@@ -3152,6 +3159,8 @@ class MiniMaxH3DirectorEditor {
         this.exportSourceImagesCb = this.root.querySelector('[data-r="out-export-source"]');
         this.outMaxFrames = this.root.querySelector('[data-r="out-max-frames"]');
         this.outExportMode = this.root.querySelector('[data-r="out-export-mode"]');
+        this.outMergeMethod = this.root.querySelector('[data-r="out-merge-method"]');
+        this.outMergeMethodWrap = this.root.querySelector('[data-r="out-merge-method-wrap"]');
         this.segmentContinuityWrap = this.root.querySelector('[data-r="segment-continuity-wrap"]');
         this.segmentContinuityCb = this.root.querySelector('[data-r="segment-continuity-cb"]');
         this.segmentContinuityOverlap = this.root.querySelector('[data-r="segment-continuity-overlap"]');
@@ -3419,6 +3428,9 @@ class MiniMaxH3DirectorEditor {
         };
         this.outMaxFrames.onchange = () => this.onOutputField("maxExportFrames", +this.outMaxFrames.value);
         this.outExportMode.onchange = () => this.onOutputField("exportMode", this.outExportMode.value);
+        if (this.outMergeMethod) {
+            this.outMergeMethod.onchange = () => this.onOutputField("mergeMethod", this.outMergeMethod.value);
+        }
         if (this.outAudioMode) {
             this.outAudioMode.onchange = () => this.onOutputField("audioMode", this.outAudioMode.value);
         }
@@ -4874,6 +4886,9 @@ class MiniMaxH3DirectorEditor {
             this.outMaxFrames.classList.toggle("hidden", (isBatch || isFl2v) && !showBatchExport);
             this.outMaxFrames.previousElementSibling?.classList.toggle("hidden", (isBatch || isFl2v) && !showBatchExport);
         }
+        // Refresh「合并方式」visibility after the export-mode control's hidden/disabled
+        // state is set above (it hides for batch/fl2v, and only applies to全部导出).
+        this.updateMergeMethodUI();
 
         if ((isGen || isBatch || isFl2v) && prev === "video") {
             this.currentFrame = 0;
@@ -5990,7 +6005,7 @@ class MiniMaxH3DirectorEditor {
             megapixels: DEFAULT_MEGAPIXELS,
             multiple: MINIMAX_CANVAS_MULTIPLE,
             longEdge: 848, width: 848, height: 480,
-            maxExportFrames: 0, exportMode: "all",
+            maxExportFrames: 0, exportMode: "all", mergeMethod: "stream",
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
@@ -6029,6 +6044,7 @@ class MiniMaxH3DirectorEditor {
         if (this.outH) this.outH.value = String(out.height ?? 480);
         if (this.outMaxFrames) this.outMaxFrames.value = String(out.maxExportFrames ?? 0);
         if (this.outExportMode) this.outExportMode.value = out.exportMode === "segments" ? "segments" : "all";
+        if (this.outMergeMethod) this.outMergeMethod.value = out.mergeMethod === "classic" ? "classic" : "stream";
         if (this.outAudioMode) {
             const am = normalizeAudioMode(out.audioMode);
             this.outAudioMode.value = am;
@@ -6046,6 +6062,7 @@ class MiniMaxH3DirectorEditor {
         this.syncFrameRateUI(this.timeline.frameRate);
         this.updateOutputModeUI();
         this.updateSegmentContinuityUI();
+        this.updateMergeMethodUI();
         this.syncExportSourceImagesUI();
         this.updateOutputPreview();
     }
@@ -6061,6 +6078,20 @@ class MiniMaxH3DirectorEditor {
         const on = show && !!this.timeline.output.exportSourceImages;
         if (this.exportSourceImagesCb) this.exportSourceImagesCb.checked = on;
         if (w) w.value = on;
+    }
+
+    updateMergeMethodUI() {
+        // 「合并方式」only applies to「全部导出」(stream vs classic concat). Hide it when the
+        // export-mode control is itself hidden (batch/fl2v force "all") or when 分段导出
+        // is active — there RAM is already bounded by per-segment poster release.
+        const exportCtlHidden = !!this.outExportMode
+            && (this.outExportMode.disabled || this.outExportMode.classList.contains("hidden"));
+        const show = (this.timeline?.output?.exportMode ?? "all") !== "segments" && !exportCtlHidden;
+        if (this.outMergeMethodWrap) {
+            this.outMergeMethodWrap.classList.toggle("hidden", !show);
+            this.outMergeMethodWrap.hidden = !show;
+            this.outMergeMethodWrap.setAttribute("aria-hidden", show ? "false" : "true");
+        }
     }
 
     updateSegmentContinuityUI() {
@@ -6304,7 +6335,7 @@ class MiniMaxH3DirectorEditor {
             megapixels: DEFAULT_MEGAPIXELS,
             multiple: MINIMAX_CANVAS_MULTIPLE,
             longEdge: 848, width: 848, height: 480,
-            maxExportFrames: 0, exportMode: "all",
+            maxExportFrames: 0, exportMode: "all", mergeMethod: "stream",
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,
@@ -6354,6 +6385,8 @@ class MiniMaxH3DirectorEditor {
             this.timeline.output.maxExportFrames = Number.isFinite(n) && n > 0 ? n : 0;
         } else if (key === "exportMode") {
             this.timeline.output.exportMode = value === "segments" ? "segments" : "all";
+        } else if (key === "mergeMethod") {
+            this.timeline.output.mergeMethod = value === "classic" ? "classic" : "stream";
         } else if (key === "audioMode") {
             this.timeline.output.audioMode = normalizeAudioMode(value);
         } else if (key === "continuityEnabled") {
@@ -6466,7 +6499,7 @@ class MiniMaxH3DirectorEditor {
         this.timeline.frameRate = this.getFrameRate();
         this.timeline.output = this.timeline.output || {
             mode: "long_edge", longEdge: 864, width: 864, height: 480,
-            maxExportFrames: 0, exportMode: "all",
+            maxExportFrames: 0, exportMode: "all", mergeMethod: "stream",
             audioMode: "generate",
             refImageSize: "match",
             continuityEnabled: false, continuityOverlapFrames: DEFAULT_CONTINUITY_FRAMES,

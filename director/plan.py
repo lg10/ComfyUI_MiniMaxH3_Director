@@ -219,6 +219,7 @@ class DirectorPlan:
     source_total_frames: int = 0
     export_max_frames: int = 0
     export_mode: str = "all"  # "all" | "segments"
+    merge_method: str = "stream"  # "stream" (流式导出) | "classic" (普通导出); all-export only
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
@@ -548,6 +549,21 @@ def _resolve_export_mode(output_block: dict) -> str:
     return "all"
 
 
+def _resolve_merge_method(output_block: dict) -> str:
+    """「全部导出」concat strategy from the UI「合并方式」widget; default stream.
+
+    "stream" frees each segment's RAM pixels after disk-cache verification and
+    reloads them once at concat (peak ≈ 1× final video); "classic" holds the
+    whole timeline resident (old behavior). Ignored for分段导出.
+    """
+    method = str(
+        output_block.get("mergeMethod") or output_block.get("merge_method") or "stream"
+    ).strip().lower()
+    if method in ("classic", "normal", "resident", "普通", "普通导出"):
+        return "classic"
+    return "stream"
+
+
 def _clip_segment_ranges(
     ranges: list[tuple[int, int, dict]], export_total: int
 ) -> list[tuple[int, int, dict]]:
@@ -738,6 +754,7 @@ def build_director_plan(
 
     output_block = timeline.get("output") or {}
     export_mode = _resolve_export_mode(output_block)
+    merge_method = _resolve_merge_method(output_block)
     out_w, out_h, ref_max, output_mode = resolve_output_dimensions(
         loaded_w or meta_w or int(width),
         loaded_h or meta_h or int(height),
@@ -845,6 +862,7 @@ def build_director_plan(
         source_total_frames=source_total or total,
         export_max_frames=export_max,
         export_mode=export_mode,
+        merge_method=merge_method,
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
@@ -1012,6 +1030,10 @@ def plan_summary(plan: DirectorPlan) -> str:
         )
     export_label = "分段导出" if plan.export_mode == "segments" else "全部导出"
     lines.append(f"Export mode: {export_label}")
+    if plan.export_mode == "all":
+        lines.append(
+            f"Merge method: {'流式导出' if plan.merge_method == 'stream' else '普通导出'}"
+        )
     if plan.continuity_enabled:
         pinned = [
             seg.index + 1
