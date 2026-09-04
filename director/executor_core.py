@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import time
 from typing import Any
 
@@ -59,6 +60,7 @@ from .h3_motion_context import (
     trim_export_tail,
 )
 from .segment_cache import (
+    _fingerprint_matches,
     load_first_pass_cache,
     load_first_pass_frames_stale,
     load_segment_audio,
@@ -68,6 +70,7 @@ from .segment_cache import (
     prune_segment_cache,
     save_first_pass_cache,
     save_segment_cache,
+    segment_cache_is_current,
 )
 from .segment_mp4_export import (
     copy_segment_mp4_suffix,
@@ -77,13 +80,144 @@ from .segment_mp4_export import (
     new_segment_mp4_run_dir,
 )
 from .segment_continuity import (
+    _StreamingConcatFallback,
     concat_continuous_chunks,
+    concat_continuous_chunks_streaming,
     is_continuity_active,
     resolve_prev_segment_output,
 )
 from .vram_cleanup import cleanup_segment_vram
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.core")
+
+
+# Per-phase memory detail is opt-in (console can get noisy on long runs); peaks
+# are always tracked cheaply and surfaced once in the run report.
+_MEM_TRACE = os.environ.get("MINIMAX_DIRECTOR_MEM_TRACE", "").strip().lower() in {
+    "1", "true", "on", "yes",
+}
+
+
+# 「全部导出」(merge) streams finished segments to the disk cache and frees their
+# RAM pixels during the loop, reloading them once at concat. Bounds peak RAM to
+# ~1 merged timeline instead of growing with the segment count. Opt-in: the
+# default path still holds every segment in RAM exactly as before.
+_STREAM_MERGE = os.environ.get("MINIMAX_DIRECTOR_STREAM_MERGE", "").strip().lower() in {
+    "1", "true", "on", "yes",
+}
+
+
+def _mem_rss_mb() -> float:
+    """Resident set size (system RAM) of this process in MB, dependency-free.
+
+    Linux reads /proc/self/status VmRSS; other platforms fall back to
+    resource.getrusage ru_maxrss (bytes on macOS, kB on Linux). Best-effort:
+    returns 0.0 when unavailable so diagnostics never break a run.
+    """
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return float(line.split()[1]) / 1024.0  # kB -> MB
+    except Exception:
+        pass
+    try:
+        import resource
+
+        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return rss / (1024.0 * 1024.0) if rss > 1e7 else rss / 1024.0
+    except Exception:
+        return 0.0
+
+
+def _mem_total_mb() -> float:
+    """Total system RAM in MB from /proc/meminfo (Linux); 0.0 elsewhere."""
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return float(line.split()[1]) / 1024.0  # kB -> MB
+    except Exception:
+        pass
+    return 0.0
+
+
+def _mem_vram_mb() -> tuple[float, float]:
+    """(allocated, reserved) CUDA VRAM in MB; (0, 0) when CUDA is unavailable."""
+    try:
+        if torch.cuda.is_available():
+            return (
+                torch.cuda.memory_allocated() / (1024.0 * 1024.0),
+                torch.cuda.memory_reserved() / (1024.0 * 1024.0),
+            )
+    except Exception:
+        pass
+    return 0.0, 0.0
+
+
+def _note_mem(peaks: dict, phase: str, *, seg: int | None = None, force: bool = False) -> None:
+    """Snapshot RAM/VRAM, update running peaks, log.
+
+    Peak tracking is always on (cheap); the per-phase console line is emitted
+    only when ``force`` or MINIMAX_DIRECTOR_MEM_TRACE is set, so default runs
+    stay quiet while a crash investigation gets full boundaries.
+    """
+    rss = _mem_rss_mb()
+    alloc, reserved = _mem_vram_mb()
+    peaks["rss"] = max(peaks.get("rss", 0.0), rss)
+    peaks["vram"] = max(peaks.get("vram", 0.0), reserved)
+    if _MEM_TRACE or force:
+        seg_txt = f" seg={seg}" if seg is not None else ""
+        log.info(
+            "[MEM]%s %s: RSS=%.0fMB (peak %.0fMB) | VRAM alloc=%.0fMB "
+            "reserved=%.0fMB (peak %.0fMB)",
+            seg_txt, phase, rss, peaks["rss"], alloc, reserved, peaks["vram"],
+        )
+
+
+def _warn_merge_memory(peaks: dict, chunks, pre_chunks, reports) -> None:
+    """Estimate merged-tensor RAM cost and warn before a risky「全部导出」concat.
+
+    Merged export builds a full-timeline float32 tensor (plus a second one for
+    images_pre_refine when refine differs) while every per-segment chunk is
+    still resident, so the concat peak is ~2x(final + pre). On long multi-group
+    videos this is the RAM OOM point; advise 分段导出 before the kernel kills us.
+    """
+    try:
+        if not chunks:
+            return
+        c0 = chunks[0]
+        per_frame = int(c0.shape[1]) * int(c0.shape[2]) * int(c0.shape[3]) * 4
+        total_frames = sum(int(c.shape[0]) for c in chunks)
+        merged_mb = total_frames * per_frame / (1024.0 * 1024.0)
+        pre_differs = (
+            bool(pre_chunks)
+            and len(pre_chunks) == len(chunks)
+            and not all(a is b for a, b in zip(pre_chunks, chunks))
+        )
+        est_extra_mb = merged_mb * (2.0 if pre_differs else 1.0)
+        rss = _mem_rss_mb()
+        total_ram = _mem_total_mb()
+        peak_est = rss + est_extra_mb
+        peaks["merge_est_mb"] = est_extra_mb
+        log.info(
+            "[MEM] merge estimate: %d frames -> merged ~= %.0fMB; RSS now %.0fMB; "
+            "concat peak ~= +%.0fMB (%s).",
+            total_frames, merged_mb, rss, est_extra_mb,
+            "final + pre-refine" if pre_differs else "final only",
+        )
+        if total_ram > 0 and peak_est > 0.85 * total_ram:
+            msg = (
+                f"内存预警：「全部导出」需在 RAM 中再建约 {est_extra_mb:.0f}MB 的整段张量，"
+                f"叠加当前 {rss:.0f}MB 预计峰值 {peak_est:.0f}MB，已超过系统内存 "
+                f"{total_ram:.0f}MB 的 85%，极可能被 OOM-killer 杀死。"
+                "建议改用「分段导出」（逐段写 mp4、不在 RAM 拼接整片），"
+                "或减少提示词组数 / 缩短单段时长 / 降低分辨率后重跑。"
+            )
+            reports.append(msg)
+            log.warning("[MEM] %s", msg)
+    except Exception as exc:  # diagnostics must never break a run
+        log.debug("merge memory estimate skipped: %s", exc)
 
 
 def _segment_disk_cache_needed(
@@ -350,6 +484,79 @@ def _release_segment_pixels(
     return had
 
 
+def _stream_merge_enabled(plan: DirectorPlan, node_id: str | None) -> bool:
+    """True when「全部导出」should stream finished segments through the disk cache.
+
+    Opt-in via MINIMAX_DIRECTOR_STREAM_MERGE; only merge mode with 2+ segments
+    (so every segment is already written to the cache by _segment_disk_cache_needed).
+    """
+    if not _STREAM_MERGE or not node_id:
+        return False
+    if getattr(plan, "export_mode", "") != "all":
+        return False
+    return len(getattr(plan, "segments", None) or []) >= 2
+
+
+def _release_merge_pixels(
+    index: int,
+    *,
+    node_id: str | None,
+    plan: DirectorPlan,
+    seg_by_index: dict[int, SegmentPlan],
+    completed_outputs: dict[int, torch.Tensor],
+    completed_pre_refine: dict[int, torch.Tensor],
+    output_chunks: list[torch.Tensor],
+    output_pre_chunks: list[torch.Tensor],
+    output_segments: list,
+    segment_outputs: list[torch.Tensor],
+    segment_pre_refine: list[torch.Tensor],
+    progress_pos: dict[int, int],
+    stream_released: set[int],
+) -> bool:
+    """Free a finished merge-mode segment's RAM pixels once its cache is verified.
+
+    Releases only when the on-disk final cache still matches the segment
+    fingerprint (so the concat reload is guaranteed to succeed), then swaps the
+    RAM slots for 1-frame posters. When refine is off the pre-refine slot shares
+    the SAME poster object so the concat's same_as_final identity check still
+    holds and the second concat is skipped. Never releases the predecessor the
+    next segment will pin from — the caller keeps current-1 resident.
+    """
+    idx = int(index)
+    if idx < 0 or idx in stream_released:
+        return False
+    seg = seg_by_index.get(idx)
+    if seg is None:
+        return False
+    if idx in completed_outputs and not _fingerprint_matches(node_id, seg, plan):
+        # Cache missing/stale — keep the pixels resident (worst case == current).
+        return False
+    chunk = completed_outputs.pop(idx, None)
+    pre = completed_pre_refine.pop(idx, None)
+    if chunk is None and pre is None:
+        return False
+    poster = _poster_frame(chunk if chunk is not None else pre)
+    poster_pre = poster if (pre is None or pre is chunk) else _poster_frame(pre)
+    # output_chunks / output_pre_chunks are dense (skipped slots omitted).
+    for oi, oseg in enumerate(output_segments):
+        if getattr(oseg, "index", -1) == idx:
+            if oi < len(output_chunks):
+                output_chunks[oi] = poster
+            if oi < len(output_pre_chunks):
+                output_pre_chunks[oi] = poster_pre
+            break
+    run_pos = progress_pos.get(idx)
+    if run_pos is not None:
+        if run_pos < len(segment_outputs):
+            segment_outputs[run_pos] = poster
+        if run_pos < len(segment_pre_refine):
+            segment_pre_refine[run_pos] = poster_pre
+    stream_released.add(idx)
+    del chunk, pre
+    gc.collect()
+    return True
+
+
 def _ref_video_audios_to_dict(items) -> dict | None:
     out: dict = {}
     for item in items or []:
@@ -425,6 +632,12 @@ def execute_director_plan_core(
     except (TypeError, ValueError):
         timeline_seg_total = len(all_segments)
     timeline_seg_total = max(timeline_seg_total, len(all_segments))
+
+    # Memory diagnostics: track peak RSS (system RAM) + VRAM across the run so a
+    # crash on a long multi-group video is attributable to RAM accumulation vs. a
+    # per-decode VRAM spike. Detail gated by MINIMAX_DIRECTOR_MEM_TRACE.
+    mem_peaks: dict[str, float] = {"rss": 0.0, "vram": 0.0}
+    _note_mem(mem_peaks, "run-start", force=True)
 
     output_chunks: list[torch.Tensor] = []
     output_pre_chunks: list[torch.Tensor] = []
@@ -525,6 +738,18 @@ def execute_director_plan_core(
     # replaces older IMAGE slots with 1-frame posters.
     segment_export_lengths: dict[int, int] = {}
     export_segments_mode = plan.export_mode == "segments"
+    # 「全部导出」streaming merge: free each finished segment's RAM pixels (they
+    # are already on disk) and reload them once at concat. Bounds peak RAM to ~1
+    # merged timeline instead of growing with the group count. Default OFF.
+    stream_merge_active = _stream_merge_enabled(plan, node_id) and not export_segments_mode
+    stream_released: set[int] = set()
+    seg_by_index: dict[int, SegmentPlan] = {int(s.index): s for s in all_segments}
+    if stream_merge_active:
+        reports.append(
+            "内存优化：「全部导出」流式合并已启用（MINIMAX_DIRECTOR_STREAM_MERGE）——"
+            "每段落盘验证后即释放 RAM 像素、拼接时逐段流式重载，"
+            "峰值≈1×整片而非随提示词组数线性增长（重载失败自动回退到整片常驻）。"
+        )
 
     def _run_one_segment(
         seg, *, progress_index: int
@@ -653,11 +878,23 @@ def execute_director_plan_core(
                     "（重跑上一段或将其纳入「选择运行」可恢复衔接）"
                 )
             elif not prev_from_this_run:
-                reports.append(
-                    f"Segment {seg.index + 1}/{timeline_seg_total}: "
-                    f"引导接自上一段 #{prev_idx + 1} 的磁盘缓存"
-                    "（该段本轮未重跑；接缝对齐成片中的旧结果）"
+                prev_current_era = (
+                    prev_seg is not None
+                    and segment_cache_is_current(node_id, prev_seg, plan)
                 )
+                if prev_current_era:
+                    reports.append(
+                        f"Segment {seg.index + 1}/{timeline_seg_total}: "
+                        f"引导接自上一段 #{prev_idx + 1} 的磁盘缓存"
+                        "（该段本轮未重跑，但参数与当前一致；接缝对齐成片中的现有结果）"
+                    )
+                else:
+                    reports.append(
+                        f"Segment {seg.index + 1}/{timeline_seg_total}: "
+                        f"引导接自上一段 #{prev_idx + 1} 的【旧参数时代】磁盘缓存"
+                        "（该段参数已变但本轮未重跑；接缝可能不匹配，"
+                        "建议重跑上一段或将其纳入「选择运行」）"
+                    )
             if prev_handoff:
                 prev_end_frame = handoff_end_frame(
                     trim_frames=int(prev_handoff.get("trim_frames") or 0),
@@ -1012,9 +1249,15 @@ def execute_director_plan_core(
             cached_sample = int(cached_h.get("sample_frames") or 0)
             if cached_sample > 0:
                 sample_len = cached_sample
+            stale_prev_note = (
+                "；本段沿用旧一采（上游段已重抽，不在本次选择范围内），拼接处可能不衔接"
+                if pre_cache.get("stale_prev")
+                else ""
+            )
             reports.append(
                 f"Segment {ui_idx + 1}/{timeline_seg_total}: 命中一采缓存 "
                 f"(seed={int(getattr(plan, 'sample_seed', seed) or seed)})，跳过一采，开始二采"
+                f"{stale_prev_note}"
             )
         else:
             samples = sample_single_stage(
@@ -1193,6 +1436,7 @@ def execute_director_plan_core(
             node_id, segment_index=progress_index, segment_total=seg_total,
             phase="decode", phase_value=1, phase_max=1, **meta,
         )
+        _note_mem(mem_peaks, "post-decode", seg=seg.index)
 
         chunk = decoded
         if getattr(chunk, "device", None) is not None and chunk.device.type != "cpu":
@@ -1331,6 +1575,25 @@ def execute_director_plan_core(
         )
         return chunk, audio_dict, pre_chunk
 
+    def _release_merge(idx: int) -> None:
+        """Stream-merge release: free idx's RAM pixels (already verified on disk)."""
+        if stream_merge_active:
+            _release_merge_pixels(
+                idx,
+                node_id=node_id,
+                plan=plan,
+                seg_by_index=seg_by_index,
+                completed_outputs=completed_outputs,
+                completed_pre_refine=completed_pre_refine,
+                output_chunks=output_chunks,
+                output_pre_chunks=output_pre_chunks,
+                output_segments=output_segments,
+                segment_outputs=segment_outputs,
+                segment_pre_refine=segment_pre_refine,
+                progress_pos=progress_pos,
+                stream_released=stream_released,
+            )
+
     for seg in all_segments:
         # AV latent and decoded refine-pass clips are a rolling continuity
         # working set, not final outputs. At the start of segment N, only N-1
@@ -1353,6 +1616,13 @@ def execute_director_plan_core(
                         segment_pre_refine=segment_pre_refine,
                         progress_pos=progress_pos,
                     )
+        elif stream_merge_active:
+            # Same cadence as「分段导出」(prev stays resident for the pin), but
+            # pixels are freed to the verified disk cache instead of a poster-only
+            # drop — concat reloads them once at the end.
+            for stale in tuple(completed_outputs):
+                if int(stale) < int(seg.index) - 1:
+                    _release_merge(stale)
         if seg.index in run_indices:
             if clear_vram_between_segments and segment_outputs:
                 cleanup_segment_vram(enabled=True)
@@ -1367,6 +1637,7 @@ def execute_director_plan_core(
             segment_audios.append(audio_dict or {})
             segment_export_lengths[seg.index] = int(chunk.shape[0])
             resampled_this_run.add(seg.index)
+            _note_mem(mem_peaks, "seg-done", seg=seg.index, force=True)
             if export_segments_mode and seg.index > 0:
                 # Next pin + phase-trim already happened inside _run_one_segment.
                 _release_segment_pixels(
@@ -1382,6 +1653,10 @@ def execute_director_plan_core(
                 output_chunks.append(chunk)
                 output_pre_chunks.append(pre_chunk)
                 output_segments.append(seg)
+                if stream_merge_active and seg.index > 0:
+                    # seg already pinned + phase-trimmed seg-1 and re-saved its
+                    # cache inside _run_one_segment, so seg-1 is now disk-only.
+                    _release_merge(seg.index - 1)
             continue
 
         if plan.export_mode != "all":
@@ -1432,6 +1707,9 @@ def execute_director_plan_core(
             output_chunks.append(cached)
             output_pre_chunks.append(completed_pre_refine[seg.index])
             output_segments.append(seg)
+            # Authoritative export length so a stream-merge release of this
+            # (exact-cache) fill can still be sized correctly at concat.
+            segment_export_lengths[seg.index] = int(cached.shape[0])
             continue
 
         # Not selected + no cache: v2v/rv2v may fill from source video; gen batch must not
@@ -1454,6 +1732,7 @@ def execute_director_plan_core(
         output_chunks.append(fill)
         output_pre_chunks.append(fill)
         output_segments.append(seg)
+        segment_export_lengths[seg.index] = int(fill.shape[0])
 
     if passthrough_indices:
         reports.append(
@@ -1504,7 +1783,17 @@ def execute_director_plan_core(
             f"{missing_audio} — those slots are silent in the merge. "
             "Re-run them once (or run all) to refresh audio cache."
         )
-    export_frame_counts = [int(c.shape[0]) for c in export_chunks]
+    # Authoritative per-segment export lengths for the merge. Released (stream)
+    # slots hold 1-frame posters, so prefer segment_export_lengths; fall back to
+    # the resident tensor's real length for slots that were never released.
+    merge_lengths = [
+        int(segment_export_lengths.get(seg.index) or 0) or int(c.shape[0])
+        for seg, c in zip(export_segments, export_chunks)
+    ]
+    if stream_merge_active and stream_released:
+        export_frame_counts = list(merge_lengths)
+    else:
+        export_frame_counts = [int(c.shape[0]) for c in export_chunks]
     # segment_outputs path (分段导出 / image batch): keep run-order audios.
     if plan.export_mode == "all" and output_chunks:
         segment_audios = export_audios
@@ -1535,7 +1824,6 @@ def execute_director_plan_core(
             "and continuity pin (no full-timeline concat; IMAGE keeps a 1-frame poster)."
         )
     else:
-        combined = concat_continuous_chunks(export_chunks, export_segments, plan)
         pre_source = export_pre_chunks if export_pre_chunks else segment_pre_refine
         if not pre_source:
             pre_source = list(segment_outputs)
@@ -1543,11 +1831,99 @@ def execute_director_plan_core(
             len(pre_source) == len(export_chunks)
             and all(a is b for a, b in zip(pre_source, export_chunks))
         )
-        pre_combined = (
-            combined
-            if same_as_final
-            else concat_continuous_chunks(pre_source, export_segments, plan)
-        )
+        if stream_merge_active and stream_released:
+            # Streaming merge: reload each released segment from its verified disk
+            # cache exactly once and copy into a pre-allocated buffer, so the concat
+            # peak stays ~1 merged timeline instead of ~3x. Any reload/geometry
+            # failure falls back to the classic in-RAM path (worst case == current).
+            def _merge_chunk(i: int, *, is_pre: bool):
+                seg = export_segments[i]
+                idx = seg.index
+                want = int(merge_lengths[i])
+                if idx not in stream_released:
+                    held = pre_source[i] if is_pre else export_chunks[i]
+                    if (
+                        isinstance(held, torch.Tensor)
+                        and held.ndim == 4
+                        and int(held.shape[0]) == want
+                    ):
+                        return held
+                if is_pre:
+                    t = load_first_pass_frames_stale(node_id, seg, plan, match_len=want)
+                    if t is None:
+                        t = load_segment_cache(node_id, seg, plan)
+                else:
+                    t = load_segment_cache(node_id, seg, plan)
+                if t is None:
+                    t = load_segment_cache(node_id, seg, plan, allow_stale=True)
+                if t is None:
+                    return None
+                t = t.float()
+                return t if int(t.shape[0]) == want else None
+
+            def _concat(is_pre: bool):
+                try:
+                    return concat_continuous_chunks_streaming(
+                        lambda i: _merge_chunk(i, is_pre=is_pre),
+                        len(export_segments),
+                        merge_lengths,
+                        plan=plan,
+                    )
+                except _StreamingConcatFallback as exc:
+                    log.warning(
+                        "Stream-merge concat fell back to in-RAM path (pre=%s): %s",
+                        is_pre, exc,
+                    )
+                    reports.append(
+                        f"流式合并回退到整片常驻拼接（pre={is_pre}：{exc}）——"
+                        "本次峰值内存与旧版一致，输出不受影响。"
+                    )
+                    chunks_list = pre_source if is_pre else export_chunks
+                    for i, seg in enumerate(export_segments):
+                        if seg.index not in stream_released:
+                            continue
+                        t = _merge_chunk(i, is_pre=is_pre)
+                        if t is None:
+                            t = torch.full(
+                                (
+                                    max(1, int(merge_lengths[i])),
+                                    int(plan.height),
+                                    int(plan.width),
+                                    3,
+                                ),
+                                0.5,
+                            )
+                            log.error(
+                                "Stream-merge reload FAILED for segment %d; gray placeholder used.",
+                                seg.index + 1,
+                            )
+                            reports.append(
+                                f"段 {seg.index + 1} 流式重载失败，已用 {int(merge_lengths[i])} 帧灰占位——"
+                                "磁盘缓存可能被删除/损坏，请重跑该段。"
+                            )
+                        chunks_list[i] = t
+                    return concat_continuous_chunks(chunks_list, export_segments, plan)
+
+            combined = _concat(is_pre=False)
+            pre_combined = combined if same_as_final else _concat(is_pre=True)
+            reports.append(
+                f"流式合并完成：拼接期逐段从磁盘缓存重载（释放 {len(stream_released)} 段常驻像素），"
+                "峰值≈1×整片。"
+            )
+        else:
+            _warn_merge_memory(mem_peaks, export_chunks, export_pre_chunks, reports)
+            combined = concat_continuous_chunks(export_chunks, export_segments, plan)
+            pre_combined = (
+                combined
+                if same_as_final
+                else concat_continuous_chunks(pre_source, export_segments, plan)
+            )
+        _note_mem(mem_peaks, "post-concat", force=True)
+    _note_mem(mem_peaks, "run-end", force=True)
+    reports.append(
+        f"内存峰值：RSS {mem_peaks.get('rss', 0.0):.0f}MB / VRAM {mem_peaks.get('vram', 0.0):.0f}MB"
+        "（设置环境变量 MINIMAX_DIRECTOR_MEM_TRACE=1 可打印逐段/逐相位明细）。"
+    )
     return (
         combined,
         segment_outputs,

@@ -13,11 +13,16 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
-from ..lib.image_prep import cat_frames_variable_size, fit_canvas, fit_long_edge
+from ..lib.image_prep import (
+    cat_frames_variable_size,
+    fit_canvas,
+    fit_long_edge,
+    pad_frames_to_canvas,
+)
 from .h3_motion_context import (
     CONTINUITY_TASK_KEYS,
     DEFAULT_CONTEXT_FRAMES as DEFAULT_CONTINUITY_OVERLAP,
@@ -1565,6 +1570,113 @@ def concat_continuous_chunks(
         fixed[-1] = left
         fixed.append(body)
     return cat_frames_variable_size(fixed)
+
+
+class _StreamingConcatFallback(Exception):
+    """Streaming merge concat cannot guarantee a bit-identical result.
+
+    Raised when a segment will not reload from cache, its length disagrees with
+    the authoritative export length, or its geometry exceeds the output canvas.
+    The caller catches this and falls back to the classic in-RAM
+    :func:`concat_continuous_chunks`, so the worst case is the current path.
+    """
+
+
+def _streaming_chunk_ok(tensor: Any) -> bool:
+    return isinstance(tensor, torch.Tensor) and tensor.ndim == 4 and int(tensor.shape[0]) > 0
+
+
+def concat_continuous_chunks_streaming(
+    get_chunk: Callable[[int], Any],
+    count: int,
+    lengths: list[int],
+    *,
+    plan: DirectorPlan,
+) -> torch.Tensor:
+    """Memory-bounded, bit-identical twin of :func:`concat_continuous_chunks`.
+
+    The classic concat holds every segment in RAM at once and then builds the
+    merged tensor (peak ~3x one timeline), which is the「全部导出」OOM point on
+    long multi-group videos. This variant pulls each segment through
+    ``get_chunk(i)`` (typically a disk-cache reload) exactly once, runs the SAME
+    seam functions in the SAME order, copies each segment's final form into a
+    pre-allocated output buffer, then drops the source. Peak RAM is ~1 merged
+    timeline plus a couple of segment-sized temporaries.
+
+    ``lengths[i]`` must be the authoritative export frame count of segment ``i``
+    (post phase-align trim) so the output buffer can be sized before loading.
+    Every seam helper preserves frame count and returns a fresh clone, so the
+    result is bit-identical to the classic path. Anything unexpected raises
+    :class:`_StreamingConcatFallback` so the caller can fall back rather than
+    emit a wrong merge.
+    """
+    n = int(count)
+    if n <= 0:
+        raise _StreamingConcatFallback("no chunks to stream-concat")
+    if len(lengths) != n:
+        raise _StreamingConcatFallback("lengths/count mismatch")
+    lens = [int(x) for x in lengths]
+    if any(x <= 0 for x in lens):
+        raise _StreamingConcatFallback("non-positive segment length")
+    total = int(sum(lens))
+
+    first = get_chunk(0)
+    if not _streaming_chunk_ok(first) or int(first.shape[0]) != lens[0]:
+        raise _StreamingConcatFallback("segment 0 unavailable or length mismatch")
+    H, W, C = int(first.shape[1]), int(first.shape[2]), int(first.shape[3])
+    out = torch.empty((total, H, W, C), dtype=first.dtype)
+
+    def _emit(off: int, chunk: Any) -> int:
+        if not _streaming_chunk_ok(chunk):
+            raise _StreamingConcatFallback("missing chunk during emit")
+        length = int(chunk.shape[0])
+        if off + length > total:
+            raise _StreamingConcatFallback("output overflow during emit")
+        piece = chunk
+        if int(piece.shape[1]) > H or int(piece.shape[2]) > W or int(piece.shape[3]) != C:
+            raise _StreamingConcatFallback("segment geometry exceeds canvas")
+        if int(piece.shape[1]) != H or int(piece.shape[2]) != W:
+            piece = pad_frames_to_canvas(piece, W, H, fill=0.5)
+        out[off:off + length] = piece.to(out.dtype)
+        return off + length
+
+    continuity = bool(getattr(plan, "continuity_enabled", False))
+    if not continuity or n < 2:
+        # Plain concat (matches cat_frames_variable_size on a uniform canvas).
+        off = _emit(0, first)
+        for i in range(1, n):
+            piece = get_chunk(i)
+            if not _streaming_chunk_ok(piece) or int(piece.shape[0]) != lens[i]:
+                raise _StreamingConcatFallback(f"segment {i} unavailable or length mismatch")
+            off = _emit(off, piece)
+        if off != total:
+            raise _StreamingConcatFallback("offset != total (plain)")
+        return out
+
+    # Continuity path — mirror concat_continuous_chunks data flow exactly, but
+    # copy each segment's FINAL form out as soon as the next seam fixes it.
+    prev = first
+    off = 0
+    for i in range(1, n):
+        cur = get_chunk(i)
+        if not _streaming_chunk_ok(cur) or int(cur.shape[0]) != lens[i]:
+            raise _StreamingConcatFallback(f"segment {i} unavailable or length mismatch")
+        left = _unfreeze_held_tail(prev)
+        if CONTINUITY_HOLD_POP_ON_TAIL:
+            left = _break_hold_pop_window(left, from_end=True)
+        body = _break_hold_pop_window(cur, from_end=False)
+        if float(CONTINUITY_SPIKE_WEIGHT) > 0:
+            body = _ease_opening_spikes(body)
+        body = _soften_body0_toward_prev(body, left)
+        body = _additive_opening_luma(body, left)
+        left, body = _micro_seam_bridge(left, body)
+        off = _emit(off, left)
+        del cur
+        prev = body
+    off = _emit(off, prev)
+    if off != total:
+        raise _StreamingConcatFallback("offset != total (continuity)")
+    return out
 
 
 def apply_cached_segment_continuity(
