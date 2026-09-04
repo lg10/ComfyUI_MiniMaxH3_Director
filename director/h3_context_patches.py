@@ -362,10 +362,23 @@ def ensure_layout_patch() -> bool:
         )
     if owner == "compatible_solattn":
         log.info("Director continuity: composing with SolAttn H3 layout observer")
-    if owner == "foreign_other":
-        raise RuntimeError(
-            "Director continuity: another pack already patched MiniMax H3 "
-            "PackedLayout.__init__. Disable the other pack and restart ComfyUI."
+    elif owner == "foreign_other":
+        # Don't hard-reject an unknown PackedLayout wrapper. Director's rewrite is
+        # validated by _self_test_layout() below against whatever __init__ is
+        # installed right now: an observer-only wrapper (SolAttn-style, a renamed
+        # SolAttn, or a SageAttention pack) keeps the endpoint coordinates intact,
+        # so the self-test passes and we compose; a wrapper that truly corrupts the
+        # time coordinates fails the self-test and we raise with a clear message.
+        # Behavior beats a hardcoded allow-list that breaks the moment a pack
+        # renames its wrapper. (#109 SageAttention ecosystem)
+        _init = getattr(getattr(_mm(), "PackedLayout", None), "__init__", None)
+        _where = getattr(_init, "__module__", "?")
+        _qual = getattr(_init, "__qualname__", None) or getattr(_init, "__name__", "?")
+        log.warning(
+            "Director continuity: composing over an unknown PackedLayout.__init__ "
+            "patch (%s.%s); the layout self-test below decides if it is safe.",
+            _where,
+            _qual,
         )
     mm = _mm()
     if not hasattr(mm, "PackedLayout") or not hasattr(mm, "FRAME_RESCALE"):
@@ -427,6 +440,15 @@ def _classify_payload_owner() -> str | None:
         return "ours"
     if getattr(fn, "_h3_motion_context_payload_patch", False):
         return "foreign_mc"
+    # SolAttn (and its v5 fork) accelerate H3 by observing PackedLayout *and*
+    # wrapping MiniMaxH3.extra_conds. The Director merge is additive — it calls
+    # the wrapped extra_conds, then repairs cond_video_latents — so it composes
+    # over SolAttn exactly like the layout patch already does.
+    module = str(getattr(fn, "__module__", "")).replace("\\", "/")
+    if module.endswith("ComfyUI-SolAttn_triton._morton_h3") or module.endswith(
+        "sol_attn_minimax_v5"
+    ):
+        return "compatible_solattn"
     if getattr(fn, "__name__", "") in {"_patched_extra_conds", "_director_extra_conds"}:
         return "foreign_other"
     if hasattr(fn, "__wrapped__"):
@@ -452,16 +474,30 @@ def ensure_payload_patch() -> bool:
             "Director continuity: standalone ComfyUI-H3-Motion-Context already patched "
             "MiniMaxH3.extra_conds. Disable that pack and restart ComfyUI."
         )
-    if owner == "foreign_other":
-        raise RuntimeError(
-            "Director continuity: another pack already patched MiniMaxH3.extra_conds. "
-            "Disable the other pack and restart ComfyUI."
-        )
     import comfy.model_base as model_base
 
     cls = getattr(model_base, "MiniMaxH3", None)
     if cls is None or not hasattr(cls, "extra_conds"):
         raise RuntimeError("Director continuity: MiniMaxH3.extra_conds not found.")
+    if owner == "compatible_solattn":
+        log.info(
+            "Director continuity: composing keyframe/ref merge with SolAttn H3 extra_conds"
+        )
+    elif owner == "foreign_other":
+        # The merge is additive and degrades gracefully (see _director_extra_conds),
+        # so stack it over the unknown wrapper instead of blocking r2v/v2v/rv2v
+        # continuity outright. Only a second Motion-Context pack truly conflicts.
+        where = getattr(cls.extra_conds, "__module__", "?")
+        qual = getattr(cls.extra_conds, "__qualname__", None) or getattr(
+            cls.extra_conds, "__name__", "?"
+        )
+        log.warning(
+            "Director continuity: stacking keyframe/ref merge over an existing "
+            "MiniMaxH3.extra_conds patch (%s.%s). If r2v/v2v/rv2v continuity looks "
+            "wrong, that pack may conflict — report it so it can be allow-listed.",
+            where,
+            qual,
+        )
     _payload_orig = cls.extra_conds
     cls.extra_conds = _director_extra_conds
     _payload_applied = True
