@@ -220,6 +220,7 @@ class DirectorPlan:
     export_max_frames: int = 0
     export_mode: str = "all"  # "all" | "segments"
     merge_method: str = "stream"  # "stream" (流式导出) | "classic" (普通导出); all-export only
+    auto_merge_segments: bool = True  # 分段导出 also pipes a single merged.mp4 (default ON)
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
@@ -564,6 +565,25 @@ def _resolve_merge_method(output_block: dict) -> str:
     return "stream"
 
 
+def _resolve_segment_auto_merge(output_block: dict) -> bool:
+    """「分段导出」also auto-concat a single merged.mp4; default ON.
+
+    Segment mode never builds the full-timeline tensor, so this streams the
+    seam-processed frames straight from the disk cache to ffmpeg — one merged
+    file with「全部导出」(流式合并) fidelity at ~1-2 segments of RAM, so users
+    need not hand-concat the seg mp4s. Only applies to分段导出; ignored for
+    全部导出 (which already returns a single merged tensor).
+    """
+    val = output_block.get("segmentAutoMerge")
+    if val is None:
+        val = output_block.get("segment_auto_merge")
+    if val is None:
+        return True
+    if isinstance(val, str):
+        return val.strip().lower() not in {"0", "false", "off", "no", ""}
+    return bool(val)
+
+
 def _clip_segment_ranges(
     ranges: list[tuple[int, int, dict]], export_total: int
 ) -> list[tuple[int, int, dict]]:
@@ -755,6 +775,7 @@ def build_director_plan(
     output_block = timeline.get("output") or {}
     export_mode = _resolve_export_mode(output_block)
     merge_method = _resolve_merge_method(output_block)
+    auto_merge_segments = _resolve_segment_auto_merge(output_block)
     out_w, out_h, ref_max, output_mode = resolve_output_dimensions(
         loaded_w or meta_w or int(width),
         loaded_h or meta_h or int(height),
@@ -863,6 +884,7 @@ def build_director_plan(
         export_max_frames=export_max,
         export_mode=export_mode,
         merge_method=merge_method,
+        auto_merge_segments=auto_merge_segments,
         run_indices=_parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
@@ -1033,6 +1055,10 @@ def plan_summary(plan: DirectorPlan) -> str:
     if plan.export_mode == "all":
         lines.append(
             f"Merge method: {'流式导出' if plan.merge_method == 'stream' else '普通导出'}"
+        )
+    if plan.export_mode == "segments":
+        lines.append(
+            f"Auto-merge single file: {'ON' if plan.auto_merge_segments else 'OFF'}"
         )
     if plan.continuity_enabled:
         pinned = [

@@ -27,6 +27,7 @@ from .audio_export import (
     AUDIO_MODE_GENERATE,
     AUDIO_MODE_MUTE,
     AUDIO_MODE_SOURCE,
+    _merge_generated_segment_audios,
     empty_audio_dict,
     resolve_audio_mode,
 )
@@ -84,6 +85,7 @@ from .segment_continuity import (
     concat_continuous_chunks,
     concat_continuous_chunks_streaming,
     is_continuity_active,
+    iter_continuous_chunks_streaming,
     resolve_prev_segment_output,
 )
 from .vram_cleanup import cleanup_segment_vram
@@ -506,6 +508,87 @@ def _stream_merge_enabled(plan: DirectorPlan, node_id: str | None) -> bool:
     return method in {"stream", "streaming", "流式", "流式导出"}
 
 
+def _auto_merge_segments_to_mp4(
+    *,
+    plan: DirectorPlan,
+    node_id: str | None,
+    mp4_run_dir,
+    seg_by_index: dict[int, SegmentPlan],
+    segment_export_lengths: dict[int, int],
+    completed_audios: dict[int, dict],
+    reports: list[str],
+) -> str | None:
+    """分段导出 best-effort: stream a single merged.mp4 straight from the disk cache.
+
+    Mirrors「全部导出」流式合并 (SAME seam functions via
+    :func:`iter_continuous_chunks_streaming`, so the frames are bit-identical)
+    but pipes each segment to ffmpeg instead of building the整片 tensor — peak
+    RAM stays ~1-2 segments, never the ~1× merged-timeline floor that OOMs
+    全部导出. Never raises: any failure is reported and the per-segment mp4s
+    remain the authoritative output, so the worst case equals today's分段导出.
+    """
+    if mp4_run_dir is None or not node_id:
+        return None
+    indices = sorted(
+        int(i)
+        for i, n in segment_export_lengths.items()
+        if int(n or 0) > 0 and int(i) in seg_by_index
+    )
+    if len(indices) < 2:
+        # A single segment's seg mp4 already IS the whole timeline.
+        return None
+    segs = [seg_by_index[i] for i in indices]
+    lengths = [int(segment_export_lengths[i]) for i in indices]
+    total = int(sum(lengths))
+    fps = float(getattr(plan, "frame_rate", 24) or 24)
+
+    def get_chunk(k: int):
+        seg = segs[k]
+        t = load_segment_cache(node_id, seg, plan)
+        if t is None:
+            t = load_segment_cache(node_id, seg, plan, allow_stale=True)
+        if t is None:
+            return None
+        return t.float()
+
+    try:
+        from ..lib.video_export import stream_frames_to_mp4
+
+        # Prefer this-run audio; fall back to the disk cache for「选择运行」
+        # slots hydrated from cache (missing audio → silence, never a crash).
+        audios: list[dict] = []
+        for i in indices:
+            a = completed_audios.get(i)
+            if not a:
+                a = load_segment_audio(node_id, seg_by_index[i], plan, allow_stale=True)
+            audios.append(a or {})
+        merged_audio = _merge_generated_segment_audios(
+            plan, audios, total_frames=total, fps=fps, frame_counts=lengths,
+        )
+        dest = mp4_run_dir / "merged.mp4"
+        stream_frames_to_mp4(
+            dest,
+            iter_continuous_chunks_streaming(get_chunk, len(segs), lengths, plan=plan),
+            fps=fps,
+            audio=merged_audio,
+        )
+        return str(dest)
+    except _StreamingConcatFallback as exc:
+        log.warning("分段导出自动拼接中止（磁盘缓存重载/几何校验失败）：%s", exc)
+        reports.append(
+            f"⚠️ 分段导出自动拼接未完成（{exc}）——磁盘缓存可能缺失/损坏；"
+            "各 seg mp4 已完整写出，可手动拼接或重跑刷新缓存后再试。"
+        )
+        return None
+    except Exception as exc:
+        log.warning("分段导出自动拼接 merged.mp4 失败（生成不受影响）：%s", exc)
+        reports.append(
+            f"⚠️ 分段导出自动拼接 merged.mp4 失败（{type(exc).__name__}: {exc}）——"
+            "各 seg mp4 已完整写出，生成不受影响。"
+        )
+        return None
+
+
 def _release_merge_pixels(
     index: int,
     *,
@@ -750,11 +833,23 @@ def execute_director_plan_core(
     # replaces older IMAGE slots with 1-frame posters.
     segment_export_lengths: dict[int, int] = {}
     export_segments_mode = plan.export_mode == "segments"
+    # Absolute path of the best-effort single-file merge produced in分段导出 mode
+    # (see _auto_merge_segments_to_mp4). Surfaced to ComfyUI's Assets panel via the
+    # node's ui return — a plain path reference, never a re-materialized tensor.
+    merged_path: str | None = None
     # 「全部导出」streaming merge: free each finished segment's RAM pixels (they
     # are already on disk) and reload them once at concat. Bounds peak RAM to ~1
     # merged timeline instead of growing with the group count. Controlled by the
     # UI「合并方式」widget (plan.merge_method, default 流式导出); env var overrides.
     stream_merge_active = _stream_merge_enabled(plan, node_id) and not export_segments_mode
+    # 分段导出 can ALSO emit a single merged.mp4 by streaming the seam-processed
+    # frames from the disk cache straight to ffmpeg (RAM ~1-2 segments, never the
+    # 整片 tensor). Default ON via the UI「同时拼接为单一文件」toggle.
+    auto_merge_segments_active = (
+        export_segments_mode
+        and bool(getattr(plan, "auto_merge_segments", True))
+        and mp4_run_dir is not None
+    )
     stream_released: set[int] = set()
     seg_by_index: dict[int, SegmentPlan] = {int(s.index): s for s in all_segments}
     if not export_segments_mode and getattr(plan, "export_mode", "") == "all":
@@ -1850,6 +1945,26 @@ def execute_director_plan_core(
             "Export mode: segments — released prior-segment pixels after mp4 "
             "and continuity pin (no full-timeline concat; IMAGE keeps a 1-frame poster)."
         )
+        if auto_merge_segments_active:
+            log.info(
+                "MiniMax H3 Director 分段导出自动拼接单一文件（%d 段，流式 pipe→ffmpeg，内存有界）…",
+                len(segment_export_lengths),
+            )
+            merged_path = _auto_merge_segments_to_mp4(
+                plan=plan,
+                node_id=node_id,
+                mp4_run_dir=mp4_run_dir,
+                seg_by_index=seg_by_index,
+                segment_export_lengths=segment_export_lengths,
+                completed_audios=completed_audios,
+                reports=reports,
+            )
+            if merged_path:
+                reports.append(
+                    f"分段导出已自动拼接单一文件：{merged_path}"
+                    "（逐段从磁盘缓存流式拼接，画质同「全部导出（流式合并）」，内存峰值≈1-2 段）。"
+                )
+                log.info("MiniMax H3 Director 分段导出自动拼接完成：%s", merged_path)
     else:
         pre_source = export_pre_chunks if export_pre_chunks else segment_pre_refine
         if not pre_source:
@@ -1972,4 +2087,5 @@ def execute_director_plan_core(
         pre_combined,
         segment_pre_refine,
         held_for_confirmation,
+        merged_path,
     )

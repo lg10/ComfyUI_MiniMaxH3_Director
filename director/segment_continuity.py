@@ -1679,6 +1679,84 @@ def concat_continuous_chunks_streaming(
     return out
 
 
+def iter_continuous_chunks_streaming(
+    get_chunk: Callable[[int], Any],
+    count: int,
+    lengths: list[int],
+    *,
+    plan: DirectorPlan,
+):
+    """Generator twin of :func:`concat_continuous_chunks_streaming`.
+
+    Yields each segment's FINAL seam-processed form as a canvas-uniform NHWC
+    float chunk instead of copying it into one big pre-allocated tensor. That
+    lets a caller pipe frames straight to an encoder with peak RAM ~1-2 segments
+    — the「分段导出」single-file merge path, which must never build the整片
+    tensor. Runs the SAME seam helpers in the SAME order as both the classic and
+    streaming concat, so the yielded frames are bit-identical to what
+    :func:`concat_continuous_chunks` would place at the same offsets.
+
+    ``lengths[i]`` must be the authoritative export frame count of segment ``i``
+    (post phase-align trim). Any anomaly (missing/short chunk, geometry that
+    exceeds the canvas) raises :class:`_StreamingConcatFallback` so the caller can
+    abort the best-effort merge rather than emit a wrong file.
+    """
+    n = int(count)
+    if n <= 0:
+        raise _StreamingConcatFallback("no chunks to stream-concat")
+    if len(lengths) != n:
+        raise _StreamingConcatFallback("lengths/count mismatch")
+    lens = [int(x) for x in lengths]
+    if any(x <= 0 for x in lens):
+        raise _StreamingConcatFallback("non-positive segment length")
+
+    first = get_chunk(0)
+    if not _streaming_chunk_ok(first) or int(first.shape[0]) != lens[0]:
+        raise _StreamingConcatFallback("segment 0 unavailable or length mismatch")
+    H, W, C = int(first.shape[1]), int(first.shape[2]), int(first.shape[3])
+
+    def _canon(chunk: Any) -> torch.Tensor:
+        if not _streaming_chunk_ok(chunk):
+            raise _StreamingConcatFallback("missing chunk during emit")
+        piece = chunk
+        if int(piece.shape[1]) > H or int(piece.shape[2]) > W or int(piece.shape[3]) != C:
+            raise _StreamingConcatFallback("segment geometry exceeds canvas")
+        if int(piece.shape[1]) != H or int(piece.shape[2]) != W:
+            piece = pad_frames_to_canvas(piece, W, H, fill=0.5)
+        return piece
+
+    continuity = bool(getattr(plan, "continuity_enabled", False))
+    if not continuity or n < 2:
+        yield _canon(first)
+        for i in range(1, n):
+            piece = get_chunk(i)
+            if not _streaming_chunk_ok(piece) or int(piece.shape[0]) != lens[i]:
+                raise _StreamingConcatFallback(f"segment {i} unavailable or length mismatch")
+            yield _canon(piece)
+        return
+
+    # Continuity path — mirror concat_continuous_chunks_streaming exactly, but
+    # yield each segment's FINAL form as soon as the next seam fixes it.
+    prev = first
+    for i in range(1, n):
+        cur = get_chunk(i)
+        if not _streaming_chunk_ok(cur) or int(cur.shape[0]) != lens[i]:
+            raise _StreamingConcatFallback(f"segment {i} unavailable or length mismatch")
+        left = _unfreeze_held_tail(prev)
+        if CONTINUITY_HOLD_POP_ON_TAIL:
+            left = _break_hold_pop_window(left, from_end=True)
+        body = _break_hold_pop_window(cur, from_end=False)
+        if float(CONTINUITY_SPIKE_WEIGHT) > 0:
+            body = _ease_opening_spikes(body)
+        body = _soften_body0_toward_prev(body, left)
+        body = _additive_opening_luma(body, left)
+        left, body = _micro_seam_bridge(left, body)
+        yield _canon(left)
+        del cur
+        prev = body
+    yield _canon(prev)
+
+
 def apply_cached_segment_continuity(
     chunk: torch.Tensor,
     seg: SegmentPlan,

@@ -25,6 +25,47 @@ from ..lib.task_prompts import task_type_combo_options
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director")
 
 
+def _merged_video_ui_entry(plan, merged_video_path: str | None) -> dict | None:
+    """Register分段导出's merged.mp4 in ComfyUI's history-driven ASSETS panel.
+
+    The Director node returns no ``ui`` results, so files written straight to disk
+    (merged.mp4 / the seg mp4s) never reach the ASSETS panel — it only shows media
+    a run reported through ``ui``. Emitting the merged file here makes it visible,
+    playable and drag-reusable exactly like a SaveVideo output. This is a pure path
+    reference (filename/subfolder/type), never a re-materialized frame tensor, so it
+    adds zero memory pressure. Best-effort: any problem just skips the report.
+    """
+    if not merged_video_path:
+        return None
+    try:
+        import os
+
+        import folder_paths
+
+        out_dir = folder_paths.get_output_directory()
+        rel = os.path.relpath(os.path.abspath(merged_video_path), out_dir)
+        rel = rel.replace(os.sep, "/")
+        # ComfyUI's /view only serves files under the output dir; refuse to emit a
+        # path that escapes it (would 404 in the panel and look like a broken asset).
+        if not rel or rel in {".", ".."} or rel.startswith("../") or rel.startswith("/"):
+            return None
+        slash = rel.rfind("/")
+        subfolder = rel[:slash] if slash >= 0 else ""
+        filename = rel[slash + 1:] if slash >= 0 else rel
+        if not filename:
+            return None
+        return {
+            "filename": filename,
+            "subfolder": subfolder,
+            "type": "output",
+            "format": "video/h264-mp4",
+            "frame_rate": float(getattr(plan, "frame_rate", 24.0) or 24.0),
+        }
+    except Exception as exc:
+        log.warning("merged.mp4 ASSETS-panel report skipped: %s", exc)
+        return None
+
+
 def timeline_required_inputs() -> dict:
     """Timeline + prompt widgets shared by Director nodes."""
     combo_options, combo_meta = task_type_combo_options()
@@ -345,6 +386,7 @@ def finalize_director_outputs(
     pre_refine_combined=None,
     pre_refine_segments: list | None = None,
     block_final_images: bool = False,
+    merged_video_path: str | None = None,
 ):
     is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
     export_segments = plan.export_mode == "segments"
@@ -479,4 +521,17 @@ def finalize_director_outputs(
             "请从 images_pre_refine 查看或保存一采；再次 Queue 完成二采后 images 才会输出。"
         )
         images_out = ExecutionBlocker(None)
-    return images_out, audio_out, fps_out, frame_count, source_images_out, report, pre_refine_out
+    result = (
+        images_out,
+        audio_out,
+        fps_out,
+        frame_count,
+        source_images_out,
+        report,
+        pre_refine_out,
+    )
+    # Surface分段导出's merged.mp4 to ComfyUI's ASSETS panel (history-driven).
+    ui_video = _merged_video_ui_entry(plan, merged_video_path)
+    if ui_video is not None:
+        return {"ui": {"videos": [ui_video]}, "result": result}
+    return result

@@ -186,3 +186,159 @@ def write_frames_to_mp4(
         return dest
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _publish_mp4(tmp_mp4: Path, dest: Path) -> Path:
+    """Atomic-ish publish: write to a sibling temp then replace ``dest``."""
+    publish_tmp = dest.with_name(f".{dest.name}.{os.getpid()}.tmp")
+    try:
+        if publish_tmp.exists():
+            publish_tmp.unlink()
+        shutil.copy2(tmp_mp4, publish_tmp)
+        os.replace(publish_tmp, dest)
+    finally:
+        if publish_tmp.exists():
+            try:
+                publish_tmp.unlink()
+            except OSError:
+                pass
+    return dest
+
+
+def stream_frames_to_mp4(
+    path: str | Path,
+    pieces: Any,
+    *,
+    fps: float,
+    audio: dict[str, Any] | None = None,
+) -> Path:
+    """Encode an *iterator* of NHWC float frame-chunks to H.264 MP4 by piping to
+    ffmpeg incrementally. Raises on failure.
+
+    Unlike :func:`write_frames_to_mp4` (which buffers the whole timeline as one
+    rgb array before encoding), this feeds each chunk's bytes to ffmpeg stdin as
+    it arrives, so peak RAM stays ~1 chunk — the「分段导出」single-file merge can
+    then produce a merged.mp4 without ever materializing the整片 tensor.
+
+    The canvas (H, W) is taken from the first chunk; every later chunk must match
+    it exactly (the streaming concat generator guarantees this by padding all
+    segments to a uniform canvas). ``audio`` is a merged AUDIO dict written to a
+    wav and muxed with ``-shortest``.
+
+    Python 3.12 subprocess note: we deliberately avoid ``communicate()`` here —
+    stdin is written incrementally then closed manually, and stderr is redirected
+    to a temp file (stdout to DEVNULL) so a chatty ffmpeg can never deadlock the
+    frame feed. ``communicate()`` after a manual ``stdin.close()`` would try to
+    flush an already-closed file and raise ``ValueError`` on 3.12.
+    """
+    ffmpeg = _ffmpeg_bin()
+    if not ffmpeg:
+        raise RuntimeError(
+            "ffmpeg unavailable (install FFmpeg on PATH or `pip install imageio-ffmpeg`)"
+        )
+
+    dest = Path(path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fps = float(fps or 24.0)
+    if fps <= 0:
+        fps = 24.0
+
+    tmp_dir = tempfile.mkdtemp(prefix="minimax_mp4_stream_")
+    tmp_mp4 = Path(tmp_dir) / "out.mp4"
+    wav_path = Path(tmp_dir) / "audio.wav"
+    err_path = Path(tmp_dir) / "stderr.txt"
+    proc = None
+    try:
+        has_audio = bool(audio) and _write_wav(wav_path, audio)
+        it = iter(pieces)
+        try:
+            first = next(it)
+        except StopIteration:
+            raise ValueError("No frames to encode")
+        rgb = _pad_even_hw(_frames_to_rgb_u8(first))
+        n, h, w, _ = rgb.shape
+        if n <= 0:
+            raise ValueError("No frames to encode")
+
+        cmd = [
+            ffmpeg,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{w}x{h}",
+            "-r",
+            f"{fps:.6f}",
+            "-i",
+            "-",
+        ]
+        if has_audio:
+            cmd += ["-i", str(wav_path)]
+        cmd += [
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-movflags",
+            "+faststart",
+        ]
+        if has_audio:
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+        else:
+            cmd += ["-an"]
+        cmd.append(str(tmp_mp4))
+
+        with open(err_path, "wb") as errfh:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=errfh,
+            )
+            try:
+                proc.stdin.write(rgb.tobytes())
+                del rgb
+                for piece in it:
+                    chunk = _pad_even_hw(_frames_to_rgb_u8(piece))
+                    if chunk.shape[1] != h or chunk.shape[2] != w:
+                        raise ValueError(
+                            "stream frame canvas mismatch: got "
+                            f"{tuple(chunk.shape[1:3])}, expected {(h, w)}"
+                        )
+                    proc.stdin.write(chunk.tobytes())
+                    del chunk
+                proc.stdin.close()
+            except BrokenPipeError:
+                # ffmpeg exited early (encode error); the message is in err_path.
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+            rc = proc.wait()
+
+        err = ""
+        try:
+            err = err_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            err = ""
+        if rc != 0 or not tmp_mp4.is_file() or tmp_mp4.stat().st_size <= 0:
+            raise RuntimeError(f"ffmpeg stream encode failed (code={rc}): {err or 'unknown'}")
+        return _publish_mp4(tmp_mp4, dest)
+    finally:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)

@@ -249,7 +249,7 @@ class MiniMaxH3Director:
         )
 
         try:
-            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation = (
+            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation, merged_path = (
                 execute_director_plan_core(
                     plan,
                     node_id=unique_id,
@@ -280,6 +280,7 @@ class MiniMaxH3Director:
                 pre_refine_combined=pre_combined,
                 pre_refine_segments=pre_segments,
                 block_final_images=held_for_confirmation,
+                merged_video_path=merged_path,
             )
         finally:
             # Full source/reference PCM is execution-scoped.
