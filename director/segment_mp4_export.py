@@ -93,6 +93,7 @@ def maybe_export_segment_mp4(
     audio_dict: dict[str, Any] | None = None,
     *,
     suffix: str = "",
+    failures: list[str] | None = None,
 ) -> str | None:
     """Write one segment mp4 into ``run_dir``. Never raises.
 
@@ -140,6 +141,11 @@ def maybe_export_segment_mp4(
             "first-pass " if suffix == "pre" else "",
             exc,
         )
+        if failures is not None:
+            tag = f" ({suffix})" if suffix else ""
+            failures.append(
+                f"Segment #{int(seg.index) + 1}{tag}: {type(exc).__name__}: {exc}"
+            )
         return None
 
 
@@ -151,17 +157,18 @@ def maybe_export_segment_mp4s(
     audio_dict: dict[str, Any] | None = None,
     *,
     pre_frames: torch.Tensor | None = None,
+    failures: list[str] | None = None,
 ) -> list[str]:
     """Write final clip, plus first-pass when Refine produced a distinct tensor."""
     paths: list[str] = []
     final_path = maybe_export_segment_mp4(
-        run_dir, plan, seg, frames, audio_dict,
+        run_dir, plan, seg, frames, audio_dict, failures=failures,
     )
     if final_path:
         paths.append(final_path)
     if _pre_frames_distinct(pre_frames, frames):
         pre_path = maybe_export_segment_mp4(
-            run_dir, plan, seg, pre_frames, audio_dict, suffix="pre",
+            run_dir, plan, seg, pre_frames, audio_dict, suffix="pre", failures=failures,
         )
         if pre_path:
             paths.append(pre_path)

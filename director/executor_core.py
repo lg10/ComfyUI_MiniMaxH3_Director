@@ -665,6 +665,9 @@ def execute_director_plan_core(
         )
     # One timestamp folder per execute so all segments of this run stay together.
     mp4_run_dir = new_segment_mp4_run_dir(plan)
+    # Collect per-segment mp4 export failures so they surface in the report,
+    # not just the log — a silent empty export dir is otherwise undebuggable.
+    mp4_export_failures: list[str] = []
     if mp4_run_dir is not None:
         reports.append(f"Segment mp4 export dir: {mp4_run_dir}")
     if live_tae_preview:
@@ -1132,6 +1135,7 @@ def execute_director_plan_core(
                                 prev_chunk,
                                 completed_audios.get(prev_idx),
                                 suffix="pre",
+                                failures=mp4_export_failures,
                             )
                             mp4_paths = [pre_path] if pre_path else []
                         else:
@@ -1142,6 +1146,7 @@ def execute_director_plan_core(
                                 prev_chunk,
                                 completed_audios.get(prev_idx),
                                 pre_frames=completed_pre_refine.get(prev_idx),
+                                failures=mp4_export_failures,
                             )
                         extra_passes = list(completed_refine_passes.get(prev_idx) or [])
                         rewritten_extra: list[tuple[str, torch.Tensor]] = []
@@ -1159,6 +1164,7 @@ def execute_director_plan_core(
                                 clipped,
                                 completed_audios.get(prev_idx),
                                 suffix=suffix,
+                                failures=mp4_export_failures,
                             )
                             if extra_path:
                                 mp4_paths.append(extra_path)
@@ -1505,6 +1511,7 @@ def execute_director_plan_core(
                 chunk,
                 audio_dict if isinstance(audio_dict, dict) else None,
                 suffix="pre",
+                failures=mp4_export_failures,
             )
             mp4_paths = [pre_path] if pre_path else []
         else:
@@ -1516,6 +1523,7 @@ def execute_director_plan_core(
                 chunk,
                 audio_dict if isinstance(audio_dict, dict) else None,
                 pre_frames=pre_chunk if run_refine else None,
+                failures=mp4_export_failures,
             )
         n_refine = refine_passes_for(getattr(plan, "refine", None)) if run_refine else 1
         if isinstance(pack, dict) and (pack.get("mode") or "") == "latent_upscale":
@@ -1920,6 +1928,18 @@ def execute_director_plan_core(
             )
         _note_mem(mem_peaks, "post-concat", force=True)
     _note_mem(mem_peaks, "run-end", force=True)
+    if mp4_run_dir is not None and mp4_export_failures:
+        produced = len(list(mp4_run_dir.glob("seg_*.mp4")))
+        head = "; ".join(mp4_export_failures[:3])
+        more = (
+            f"（还有 {len(mp4_export_failures) - 3} 条，详见 ComfyUI 日志）"
+            if len(mp4_export_failures) > 3
+            else ""
+        )
+        reports.append(
+            f"⚠️ 分段导出：{len(mp4_export_failures)} 次 mp4 写入失败，实际写出 {produced} 个文件。"
+            f"原因：{head}{more}"
+        )
     reports.append(
         f"内存峰值：RSS {mem_peaks.get('rss', 0.0):.0f}MB / VRAM {mem_peaks.get('vram', 0.0):.0f}MB"
         "（设置环境变量 MINIMAX_DIRECTOR_MEM_TRACE=1 可打印逐段/逐相位明细）。"
