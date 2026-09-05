@@ -5872,8 +5872,25 @@ class MiniMaxH3DirectorEditor {
         const global = this.isGlobalMode();
         const r2vCommon = this.usesR2vCommonPanel();
         const r2vOn = this.isR2vCommonEnabled();
+        const isR2v = resolveTaskKey(this.getTaskKey()) === "r2v";
+
         this.globalPanel.style.display = (global || r2vCommon) ? "flex" : "none";
         this.segmentPanel.style.display = (global || r2vCommon) ? "none" : "flex";
+
+        // Option C: In r2v mode, hide original prompt textareas and show six-section editor.
+        // In other modes, show original textareas.
+        if (this.globalPromptLayout) {
+            this.globalPromptLayout.style.display = isR2v ? "none" : "";
+        }
+        if (this.segPromptLayout) {
+            this.segPromptLayout.style.display = isR2v ? "none" : "";
+        }
+
+        // Trigger r2v UI update in prompt enhancer panel (shows/hides six-section editor).
+        if (this._promptEnhancer?.updateR2vUI) {
+            this._promptEnhancer.updateR2vUI();
+        }
+
         this.syncR2vCommonCollapse();
         this.updateReferenceImageVisibility({
             // Show shared ref chrome only when r2v common is enabled (expanded).
