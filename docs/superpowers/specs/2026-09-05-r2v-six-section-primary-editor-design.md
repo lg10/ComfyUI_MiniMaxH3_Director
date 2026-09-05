@@ -115,6 +115,47 @@ r2v 模式下用户报告两个缺陷：
 **不算编辑**，不置位。同时 `destroy()` 改为先 flush 再 teardown（chip 的 `sync()` 需要活 DOM），
 修掉“切模式时 300ms 内的最后几个字被吞”。
 
+`destroy({ flush })` 默认 `true`，但节点级 `MiniMaxH3DirectorEditor.destroy()` 传 `false`：
+它只从 `onRemoved`（节点已删，无需保存）与重挂载路径进入，而重挂载由 `onConfigure` /
+`loadedGraphNode` / 布局回调触发，**晚于新 widget 值就位**——此时 flush 会用退出中编辑器的陈旧
+`timeline.global.prompt` 覆盖刚载入的工作流；而且 `onGlobalField` 会在前面那批 `clearTimeout`
+之后重新 arm `_syncTimer` / `_promptRenderTimer`。任务切换的待决编辑由 `_stashBatchWorkspace()`
+在快照前 flush 兼顾，不依赖这条路径。
+
+**存活期的重新解析要判定陈旧**：`refresh()` 只在 `isStale(canonical)`（= `!dirty && sourceText !== canonical`）
+时发生。`sourceText` 记录编辑器当前镜像的权威文本，**解析失败也要记**，否则对自由文本会无限重试。
+于是「导入工作流 / 切换任务工作区」会触发重新解析，而「用户正在段里打字」与「折叠视图刚接管、
+canonical 仍等于它写的值」都不会。折叠视图 `input` 时调 `noteRawEdit(text)`：清 `dirty`、置 `rawEdited`、
+把 `sourceText` 改成该文本，flush 随即变为 no-op；用户回到六段式再打字时 `dirty=true; rawEdited=false`，
+权限自动交还。
+
+**外壳必须接管撑高**：token wrap 永久嵌套后，`.bd-prompt-col`（flex 列）与 wrap 之间多出
+`.bd-r2v-full` 与 `.bd-r2v-full-body` 两层，而两者都没有 `flex` 属性（默认 `flex:0 1 auto`），
+非 r2v 模式下 wrap 拿不到列的剩余空间，提示词框会塌到 `min-height`。因此必须显式补
+`.bd-r2v-full.is-plain{flex:1 1 auto;min-height:96px}` 与
+`.bd-r2v-full.is-plain>.bd-r2v-full-body{flex:1 1 auto;min-height:0}`。
+只作用于 `is-plain`：r2v 下完整视图是逃生口，不该与六段式抢高度。
+
+**旧工作流的提示词不得看起来像丢了**：`example_workflows/minimax_h3_director_r2v.json` 自带的
+`global.prompt` 就是六段式之前的自由文本，`parseR2vSections` 对它返回 `null`，六段全空。
+因此加一条 `r2v.sections.legacyNotice` 说明条，仅在「canonical 非空但本编辑器所辖各段全空」时显示，
+明确原文仍完整保留在折叠视图里、未被修改。
+
+**「📋 模板」是迁移而非重置**：原实现 `applySections(generateR2vTemplate(...))` 用占位符整体覆盖
+sections 并立即写回 canonical。六段式成为唯一主编辑器后，这等于不可恢复地删掉用户已写内容；
+对旧工作流更是把原提示词直接换成模板样板（折叠视图镜像同一字段，也留不住原文）。改为：
+
+- 只填当前为空的段，已填的段原样保留；
+- canonical 中「未被本编辑器任何段代表」的文本（自由文本，或六段式里只命中另一个编辑器的段）
+  迁入描述段 —— 公共列进 `summary`，分组卡片进 `detailed_description`；
+- 迁入段若已有内容则追加而非覆盖；迁入时丢弃该段的方括号占位符，避免把提示性噪声发给模型。
+
+**`commit()` 必须先 flush**：`syncFromWidgets()` 用 `globalPrompt.value` 覆写 `timeline.global.prompt`，
+而六段式只在 300ms 防抖落地时才更新那个 textarea。`commit()` 有 62 处调用点，任一处落在防抖窗口内
+都会把上一版文本写进 `timeline.global.prompt` 与 `globalPromptWidget.value`——后者被 ComfyUI 直接存盘，
+仓库里没有 serialize 钩子兜底。因此在 `commit()` 开头补 `_flushGlobalR2vSections()`，
+与 `_writeTimelineWidget()` / `_stashBatchWorkspace()` 对称。
+
 ### 4. 只读「最终发送串」预览（仅分组卡片）
 
 前端镜像上述两步变换，落在新模块 `web/js/minimax_r2v_final_prompt.js`：三个纯函数、零依赖，
@@ -136,7 +177,11 @@ r2v 模式下用户报告两个缺陷：
 ## 边界
 
 - 不动后端 Python
-- 不动非 r2v 模式的任何行为（同一个 `.bd-r2v-full` 外壳以 `is-plain` 常驻展开，视觉与改动前一致）
+- 非 r2v 模式行为不变：同一个 `.bd-r2v-full` 外壳以 `is-plain` 常驻展开。但外壳必须显式接管
+  `flex` 撑高（见「实现设计 §3」），否则提示词框会塌到 `min-height`
+- chip 编辑器对官方 tag 拼写的规范化（`<picture 1>` → `<Picture 1>`、多余空格收敛）是既有行为，
+  本次不改。它使往返序列化在这类文本上不恒等，`blur` 会顺手把 canonical 规范成官方拼写；
+  后端 `reinforce_r2v_prompt` 两种拼写都认，且下一次段内输入即交还权限，故不处理（YAGNI）
 - `promptEl.oninput` / `globalPrompt.oninput` 原有写回逻辑一行不改，只额外挂一个监听器打
   `batchR2vRawEdited` 标记
 - `.bd-batch-plain` / `.bd-batch-source` 下的 token 规则**故意不加** `:not()`：卡片 class 由
@@ -152,7 +197,7 @@ r2v 模式下用户报告两个缺陷：
 - `web/js/minimax_timeline.js`（公共列折叠 + 生命周期闩锁 + CSS 收窄）
 - `web/js/minimax_image_batch.js`（分组卡片折叠 + rawEdited 仲裁 + CSS 收窄）
 - `web/js/minimax_prompt_mentions.js`（`compact` 开关、把手抑制、CSS 收窄）
-- `web/js/minimax_i18n.js`（6 个 key × zh/en）
+- `web/js/minimax_i18n.js`（7 个 key × zh/en）
 
 ## 验证
 
@@ -166,5 +211,17 @@ r2v 模式下用户报告两个缺陷：
 - 手工验证清单：r2v 公共列只显示六段式；六段式各段可 @ 出素材并渲染 chip；
   折叠视图默认收起、展开后可编辑且带警示条；最终串预览与后端 `reinforce(concat(...))` 一致；
   切到 t2v/i2v 后普通编辑器恢复；分组卡片重建（改秒数/增删组）不丢字，且完整视图的手改不被六段式覆盖。
-- 已验证（本次）：6 个文件 `node --check` 全通过；18 个用例 × 3 断言与 Python 全部一致。
+- **旧工作流迁移验证**：直接对 `parseR2vSections` / `assembleR2vSections` / `generateR2vTemplate`
+  断言 8 组共 21 项。用例取自 `example_workflows/minimax_h3_director_r2v.json` 的真实 `global.prompt`，
+  覆盖：示例确实解析不出六段式、公共列迁入 `summary` 且原文逐字保留并能被解析器往返、
+  分组卡片迁入 `detailed_description` 且不泄漏 `summary` 键、已填段不被模板覆盖、
+  空提示词只给模板、canonical 只命中另一个编辑器时仍迁入、迁入段已有内容时追加而非覆盖、
+  空 sections 组装为空串（证明 `dirty` 守卫是必需的）。
+- **chip 编辑器往返恒等验证**：用最小假 DOM 跑**真实的** `hydrateTokenEditor` / `serializeTokenEditor`，
+  断言 `serialize(hydrate(x)) === x`。这是「`blur` 未修改的折叠视图不得伪触发 `input`」的前提，
+  否则 `rawEdited` 仲裁会误判。六段式合成文本（含 `\n\n` 空行）、前导/尾随换行、连续空行、
+  纯换行、中文、制表符、四类官方 tag 全部恒等；示例工作流的旧提示词也恒等。
+  已知非恒等项只有 tag 拼写规范化，见「边界」。
+- 已验证（本次）：6 个文件 `node --check` 全通过；18 个用例 × 3 断言与 Python 全部一致；
+  旧工作流迁移 21 项全通过；chip 往返恒等全通过。
 - 待人工实机验证（需跑 ComfyUI）：上述手工清单全部项目。

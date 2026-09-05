@@ -2484,6 +2484,14 @@ export function renderImageBatchGroups(editor) {
         addBtn.disabled = externalLocked;
     }
 
+    // Card rebuild: drop the six-section editors' pending 300ms debounce.
+    // flushBatchPromptInputs() already persisted them (and skipped the ones whose
+    // folded raw view took over); a timer outliving the DOM wipe would otherwise
+    // write assembled sections back over the raw text.
+    list.querySelectorAll(".bd-r2v-sections-host").forEach((host) => {
+        host.__r2vSectionsEditor?.destroy?.({ flush: false });
+        delete host.__r2vSectionsEditor;
+    });
     teardownPromptImageMentions(list);
     list.innerHTML = "";
     const ctx = { key, variant, isVideo, runningIdx, fps, externalLocked };
@@ -2879,6 +2887,9 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             segSectionsEditor?.refresh();
             promptEl.addEventListener("input", () => {
                 promptEl.dataset.batchR2vRawEdited = "1";
+                // Same invariant on the editor itself, so flush() is a no-op even if
+                // some other path calls it without checking the dataset flag.
+                segSectionsEditor?.noteRawEdit?.(promptEl.value);
                 fullView.refreshPreview();
             });
         }

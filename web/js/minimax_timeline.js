@@ -2188,6 +2188,7 @@ class MiniMaxH3DirectorEditor {
         this.updateExternalGroupsBanner();
         // Keep any in-progress Director textarea edits before rebuilding from graph.
         if (this.isImageBatch?.()) flushBatchPromptInputs(this);
+        this._flushGlobalR2vSections();
         if (this.isFl2vMode?.()) flushFl2vPromptDraft(this);
         const specs = collectExternalGroupSpecs(this);
         if (!specs?.length) {
@@ -2688,6 +2689,7 @@ class MiniMaxH3DirectorEditor {
         // Batch prompt textareas can lag behind segment objects after duration
         // normalize — always harvest DOM drafts before serializing timeline_data.
         if (this.isImageBatch?.()) flushBatchPromptInputs(this);
+        this._flushGlobalR2vSections();
         if (this.isFl2vMode?.()) flushFl2vPromptDraft(this);
         this.syncFromWidgets();
         this.timelineWidget.value = JSON.stringify(this.buildTimelinePayload());
@@ -3683,6 +3685,16 @@ class MiniMaxH3DirectorEditor {
         this._unsubLocale?.();
         this._unsubLocale = null;
         this._closeBdModal();
+        // flush:false on purpose. destroy() runs from onRemoved (node gone, nothing
+        // to save) and from the re-mount path, which fires from onConfigure /
+        // loadedGraphNode / layout callbacks — i.e. AFTER incoming widget values are
+        // already in place. Flushing the outgoing editor there would write its stale
+        // timeline.global.prompt over the workflow being loaded. It would also
+        // re-arm _syncTimer / _promptRenderTimer via onGlobalField, after the
+        // clearTimeout calls above.
+        this._globalR2vEditor?.destroy({ flush: false });
+        this._globalR2vEditor = null;
+        this._globalR2vFullView = null;
         teardownPromptImageMentions(this.root);
         this._clearPreviewVideos(true);
         this._previewVideos?.clear();
@@ -4456,6 +4468,10 @@ class MiniMaxH3DirectorEditor {
         const key = resolveTaskKey(taskKey || this.getTaskKey());
         if (!isVideoBatchTask(key)) return;
         if (this.isImageBatch?.()) flushBatchPromptInputs(this);
+        // Persist a pending common six-section edit BEFORE the snapshot reads
+        // global.prompt: applyTaskLayout swaps in the other task's workspace right
+        // after this, so flushing on the way out (destroy) would be far too late.
+        this._flushGlobalR2vSections();
         const segs = this.timeline.segments || [];
         if (!segs.length) return;
         this._batchWsMem = this._batchWsMem || {};
@@ -5991,18 +6007,23 @@ class MiniMaxH3DirectorEditor {
                         }
                     },
                 });
-                // Parse the canonical prompt once, at creation only. Refreshing on
-                // every updateModeUI() would pull raw-view edits back into the
-                // sections and clobber whatever the user is typing.
-                this._globalR2vEditor?.refresh();
             }
+            // Re-parse only when canonical moved on without the editor knowing
+            // (import, task-workspace restore, undo). Refreshing unconditionally on
+            // every updateModeUI() would pull raw-view edits back into the sections
+            // and clobber whatever the user is typing; isStale() rules both out.
+            const canonical = this.timeline.global?.prompt || "";
+            if (this._globalR2vEditor?.isStale?.(canonical)) this._globalR2vEditor.refresh();
             host.classList.remove("hidden");
         } else {
             if (changed && view) {
                 view.root.classList.add("is-plain");
                 view.setCollapsed(false);
             }
-            this._globalR2vEditor?.destroy();
+            // Never flush here: applyTaskLayout already restored the incoming task's
+            // workspace, so writing the outgoing sections would corrupt it. The
+            // pending edit was persisted by _stashBatchWorkspace instead.
+            this._globalR2vEditor?.destroy({ flush: false });
             this._globalR2vEditor = null;
             host.classList.add("hidden");
             if (changed && this.globalPrompt) {
@@ -6010,6 +6031,16 @@ class MiniMaxH3DirectorEditor {
                 this.globalPrompt.value = this.timeline.global?.prompt || "";
             }
         }
+    }
+
+    /**
+     * Persist a pending common six-section edit into timeline.global.prompt.
+     * Call before anything snapshots, serialises or rebuilds from canonical data.
+     * No-op unless the user actually edited a section and the folded raw view has
+     * not taken over since.
+     */
+    _flushGlobalR2vSections() {
+        this._globalR2vEditor?.flush?.();
     }
 
     /**
@@ -6023,14 +6054,26 @@ class MiniMaxH3DirectorEditor {
         const wrap = this.globalPrompt?.__bdTokenWrap;
         const parent = wrap?.parentNode;
         if (!wrap || !parent) return null;
+        // Captured before createR2vFullPromptView() reparents the shell.
         const next = wrap.nextSibling;
+        // Anchor below the six-section editor, not at the shell's original slot
+        // (right after the label) — otherwise the toggle renders above the very
+        // editor it is only meant to be an escape hatch from.
+        const host = this.globalR2vSectionsHost;
+        const anchor = (host && host.parentNode === parent) ? host.nextSibling : next;
         // No final-prompt preview here: the common prompt is only a prefix, the
         // per-group cards own the "what the model receives" view.
         const view = createR2vFullPromptView({
             tokenWrap: wrap,
             warnKey: "r2v.full.warnCommon",
         });
-        parent.insertBefore(view.root, next);
+        // A real user edit in the folded editor (chip sync dispatches "input";
+        // programmatic .value writes only hydrate and stay silent) hands authority
+        // to the raw text, so the sections stop flushing over it.
+        this.globalPrompt.addEventListener("input", () => {
+            this._globalR2vEditor?.noteRawEdit?.(this.globalPrompt.value);
+        });
+        parent.insertBefore(view.root, anchor);
         this._globalR2vFullView = view;
         return view;
     }
@@ -6717,6 +6760,11 @@ class MiniMaxH3DirectorEditor {
     }
 
     commit(skipRender = false, { syncTimeline = true } = {}) {
+        // syncFromWidgets() reads global.prompt back out of the raw textarea, which
+        // the six-section editor only updates when its 300ms debounce lands. Flush
+        // first or a commit inside that window writes the previous text into both
+        // timeline.global.prompt and globalPromptWidget.value.
+        this._flushGlobalR2vSections();
         this.syncFromWidgets();
         this.normalizeSegments();
         if (this.isRunSelectEnabled()) this.normalizeRunSelection();

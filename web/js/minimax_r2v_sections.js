@@ -208,7 +208,11 @@ const SECTION_STYLES = `
 .bd-r2v-full.is-plain>.bd-r2v-full-toggle,
 .bd-r2v-full.is-plain .bd-r2v-full-warn,
 .bd-r2v-full.is-plain .bd-r2v-final{display:none}
-.bd-r2v-full.is-plain>.bd-r2v-full-body{display:flex}
+/* Nesting the wrap here put two non-growing boxes between it and the column, so
+   plain mode has to carry the grow the wrap used to take from .bd-prompt-col
+   directly. Without this every non-r2v prompt box collapses to min-height. */
+.bd-r2v-full.is-plain{flex:1 1 auto;min-height:96px}
+.bd-r2v-full.is-plain>.bd-r2v-full-body{display:flex;flex:1 1 auto;min-height:0}
 .bd-r2v-full-body{display:flex;flex-direction:column;gap:6px;min-width:0;width:100%}
 .bd-r2v-full-warn{
   font-size:10px;line-height:1.45;color:#e8a23a;
@@ -227,7 +231,15 @@ const SECTION_STYLES = `
   background:#101010;border:1px solid #2e2e2e;border-radius:6px;
   color:#c8ffd9;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
   line-height:1.5;white-space:pre-wrap;word-break:break-word;user-select:text
-}`;
+}
+
+/* Legacy prompts predating the six-section format parse to nothing; without this
+   strip the panel reads as "all empty" and looks like data loss. */
+.r2v-sections-notice{
+  font-size:10px;line-height:1.45;color:#9ab8e8;
+  background:#101a2a;border:1px solid #2a3a5a;border-radius:4px;padding:5px 8px
+}
+.r2v-sections-notice.hidden{display:none}`;
 
 let stylesInjected = false;
 
@@ -569,6 +581,13 @@ export function createR2vSectionsEditor(options) {
     // no-ops while it is false: an untouched editor holds whatever the parser
     // could recognise, so writing it back would erase unparseable prompt text.
     let dirty = false;
+    // Set when the folded raw-prompt view takes over authority. Sections are then
+    // deliberately stale: neither flushing them nor re-parsing the raw text back
+    // is allowed (that would break the "never flows back" contract).
+    let rawEdited = false;
+    // The canonical text this editor currently mirrors, so an untouched editor can
+    // tell "nothing changed" from "the workflow was swapped under me".
+    let sourceText = "";
 
     // Build DOM
     const wrapper = document.createElement("div");
@@ -624,6 +643,15 @@ export function createR2vSectionsEditor(options) {
     `;
     panel.appendChild(header);
 
+    // Legacy-prompt strip: shown only when canonical text exists but none of it
+    // landed in this editor's sections.
+    const notice = document.createElement("div");
+    notice.className = "r2v-sections-notice hidden";
+    notice.setAttribute("data-i18n", "r2v.sections.legacyNotice");
+    notice.textContent = t("r2v.sections.legacyNotice");
+    notice.hidden = true;
+    panel.appendChild(notice);
+
     // Section editors
     const sectionEditors = {};
     for (const name of activeNames) {
@@ -653,8 +681,11 @@ export function createR2vSectionsEditor(options) {
         // Debounced sync on input
         textarea.addEventListener("input", () => {
             sections[name] = textarea.value;
+            // Sections just reasserted authority over the raw view.
             dirty = true;
+            rawEdited = false;
             updateBadge(name, badge);
+            updateLegacyNotice();
             scheduleSyncToPrompt();
         });
 
@@ -738,10 +769,24 @@ export function createR2vSectionsEditor(options) {
         if (wordsEl) wordsEl.textContent = String(totalWords);
     }
 
+    /**
+     * Pre-six-section prompts (or ones whose only match fell into a section this
+     * editor does not own) parse to nothing here. Say so, and point at the folded
+     * raw view, instead of showing six "empty" badges that read as data loss.
+     */
+    function updateLegacyNotice() {
+        const canonical = String(typeof onGetPrompt === "function" ? onGetPrompt() : "").trim();
+        const allEmpty = activeNames.every((n) => !String(sections[n] || "").trim());
+        const show = !!canonical && allEmpty;
+        notice.hidden = !show;
+        notice.classList.toggle("hidden", !show);
+    }
+
     function scheduleSyncToPrompt() {
         clearTimeout(syncTimer);
         syncTimer = setTimeout(() => {
             const text = assembleR2vSections(sections, false);
+            sourceText = text;
             if (typeof onSetPrompt === "function") {
                 onSetPrompt(text);
             }
@@ -750,16 +795,21 @@ export function createR2vSectionsEditor(options) {
 
     function syncFromPrompt() {
         const text = typeof onGetPrompt === "function" ? onGetPrompt() : "";
+        // Recorded even when parsing fails, so isStale() does not retry forever on
+        // free-form prompts the parser cannot split.
+        sourceText = String(text ?? "");
         const parsed = parseR2vSections(text);
         // Pulling canonical text in is not a user edit — the parser only
         // recognises its own formats, so echoing the result back could drop
         // whatever the prompt said before.
         if (parsed) applySections(parsed, false);
+        updateLegacyNotice();
     }
 
     function syncToPrompt() {
         readTextareasIntoSections(sectionEditors, sections);
         const text = assembleR2vSections(sections, false);
+        sourceText = text;
         if (typeof onSetPrompt === "function") {
             onSetPrompt(text);
         }
@@ -767,14 +817,14 @@ export function createR2vSectionsEditor(options) {
 
     /**
      * Write the pending debounced sync out now — called before DOM teardown.
-     * No-op until the user has actually edited a section: an untouched editor
-     * only holds what parseR2vSections recognised, and echoing that back would
-     * wipe prompt text the parser does not understand.
+     * No-op until the user has actually edited a section, and no-op once the raw
+     * view has taken over: an untouched editor only holds what parseR2vSections
+     * recognised, so echoing that back would wipe text it does not understand.
      */
     function flushPendingSync() {
         clearTimeout(syncTimer);
         syncTimer = null;
-        if (!dirty) return;
+        if (!dirty || rawEdited) return;
         syncToPrompt();
     }
 
@@ -786,6 +836,25 @@ export function createR2vSectionsEditor(options) {
         }
     }
 
+    /**
+     * Where a carry-over belongs: the section meant to hold free-form scene
+     * description. detailed_description for segment editors, summary for the
+     * common one.
+     */
+    function carryOverSection() {
+        if (activeNames.includes("detailed_description")) return "detailed_description";
+        if (activeNames.includes("summary")) return "summary";
+        return activeNames[0] || null;
+    }
+
+    /**
+     * 「📋 模板」 fills blanks; it is not a reset. The six-section editor is the
+     * only primary surface in r2v, so replacing what the user already wrote with
+     * placeholders would be unrecoverable, and a prompt that predates the format
+     * would vanish entirely — the folded raw view mirrors the same canonical
+     * field, so it cannot hold the original either.
+     * (example_workflows/minimax_h3_director_r2v.json ships exactly that case.)
+     */
     function insertTemplate() {
         const hasCommon = activeNames.some(n => COMMON_SECTIONS.includes(n));
         const hasSegment = activeNames.some(n => SEGMENT_SECTIONS.includes(n));
@@ -795,7 +864,27 @@ export function createR2vSectionsEditor(options) {
             subjectCount: 1,
             shotCount: 2,
         });
-        applySections(template);
+        const canonical = String(typeof onGetPrompt === "function" ? onGetPrompt() : "").trim();
+        // Unrepresented: canonical holds text none of this editor's sections
+        // account for — free-form prose from before the format existed, or a
+        // six-section prompt whose only matches belong to the other editor.
+        // Writing the template would drop it, so it is carried over instead.
+        const parsed = canonical ? parseR2vSections(canonical) : null;
+        const represented = !!parsed && activeNames.some((n) => String(parsed[n] || "").trim());
+        const target = carryOverSection();
+        const next = {};
+        for (const name of activeNames) {
+            const current = String(sections[name] || "").trim();
+            next[name] = current || String(template[name] || "");
+        }
+        if (canonical && !represented && target) {
+            // The carry-over section ends up with real content either way, so the
+            // template's bracketed hint is dropped there — it would only be noise
+            // in what the model receives.
+            const current = String(sections[target] || "").trim();
+            next[target] = current ? `${current}\n\n${canonical}` : canonical;
+        }
+        applySections(next);
         syncToPrompt();
     }
 
@@ -834,12 +923,16 @@ export function createR2vSectionsEditor(options) {
         /** Validate and return status. */
         validate: () => validateR2vSections(sections),
 
-        /** Destroy editor and remove from DOM. */
-        destroy: () => {
+        /** Destroy editor and remove from DOM.
+         *  @param {{flush?: boolean}} [opts] - pass flush:false when the whole
+         *      panel is going away (node destroy); the canonical field is already
+         *      serialised there and writing during teardown would re-arm timers. */
+        destroy: ({ flush = true } = {}) => {
             // Flush before teardown: the chip editors' sync() needs live DOM, and
             // a mode switch inside the 300ms debounce would otherwise eat the
             // last keystrokes.
-            flushPendingSync();
+            if (flush) flushPendingSync();
+            else { clearTimeout(syncTimer); syncTimer = null; }
             // Drop the chip editors' document/window listeners before the DOM goes.
             teardownPromptImageMentions(wrapper);
             wrapper.remove();
@@ -854,6 +947,23 @@ export function createR2vSectionsEditor(options) {
 
         /** Immediately flush any debounced sync (call before DOM teardown). */
         flush: flushPendingSync,
+
+        /**
+         * True when the canonical prompt has moved on without this editor knowing
+         * — the workflow was imported, or the task workspace restored underneath
+         * it — so refresh() is safe. False while the user is editing sections
+         * (would clobber their typing) or while the raw view owns the prompt and
+         * canonical still equals what it wrote (would break "never flows back").
+         */
+        isStale: (currentText) => !dirty && sourceText !== String(currentText ?? ""),
+
+        /** The folded raw-prompt view was edited: sections lose authority, and
+         *  its text becomes what this editor mirrors until canonical diverges. */
+        noteRawEdit: (text) => {
+            dirty = false;
+            rawEdited = true;
+            sourceText = String(text ?? "");
+        },
     };
 }
 
