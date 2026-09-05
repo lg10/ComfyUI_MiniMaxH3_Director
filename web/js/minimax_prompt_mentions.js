@@ -16,7 +16,7 @@ import {
 } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
 
-const TAG_RE = /<(Picture|Video|Audio)\s+(\d+)\s*>/gi;
+const TAG_RE = /<(Subject|Picture|Video|Audio)\s+(\d+)\s*>/gi;
 const TOKEN_CLASS = "bd-token";
 
 const MENTION_STYLES = `
@@ -33,6 +33,7 @@ const MENTION_STYLES = `
 }
 .bd-mention-thumb.bd-mention-thumb-video{color:#7db7ff;background:#152030;border-color:#2a4a6a}
 .bd-mention-thumb.bd-mention-thumb-audio{color:#e0b06a;background:#2a2010;border-color:#5a4530}
+.bd-mention-thumb.bd-mention-thumb-subject{color:#a78bfa;background:#1f1530;border-color:#4a3570}
 .bd-mention-item .bd-mention-label{font-weight:600;color:#4fff8f}
 .bd-mention-empty{padding:10px 12px;font-size:11px;color:#888;text-align:center;line-height:1.4}
 
@@ -99,6 +100,10 @@ body.bd-token-resizing{cursor:ns-resize!important;user-select:none!important}
   border-color:#e8a23a;background:rgba(232,162,58,.16);color:#ffe6bf;
   box-shadow:0 0 0 1px rgba(232,162,58,.28)
 }
+.bd-token.bd-token-subject{
+  border-color:#a78bfa;background:rgba(167,139,250,.16);color:#e9d5ff;
+  box-shadow:0 0 0 1px rgba(167,139,250,.28)
+}
 .bd-token.is-missing{opacity:.62;border-style:dashed}
 .bd-token.is-missing .bd-token-label{text-decoration:line-through;text-decoration-color:rgba(255,255,255,.35)}
 .bd-token-thumb{
@@ -111,6 +116,7 @@ body.bd-token-resizing{cursor:ns-resize!important;user-select:none!important}
 .bd-token-image .bd-token-glyph{background:rgba(61,204,122,.28);color:#8dffb8}
 .bd-token-video .bd-token-glyph{background:rgba(77,159,255,.32);color:#9cc8ff}
 .bd-token-audio .bd-token-glyph{background:rgba(232,162,58,.32);color:#ffd48a}
+.bd-token-subject .bd-token-glyph{background:rgba(167,139,250,.32);color:#c4b5fd}
 .bd-token-label{max-width:7em;overflow:hidden;text-overflow:ellipsis}
 `;
 
@@ -161,12 +167,27 @@ function makeMentionMenuThumb(item) {
     // Simple geometric icons — match image thumb size, no external assets.
     if (kind === "video") thumb.textContent = "▶";
     else if (kind === "audio") thumb.textContent = "♪";
+    else if (kind === "subject") thumb.textContent = "👤";
     else thumb.textContent = "▣";
     return thumb;
 }
 
 function listAvailableMentions(refs, audios, videos) {
     const items = [];
+    // Subject group: derived from refs (each reference image can map to a Subject).
+    // Subjects are reusable visible-content units defined in subject_definitions.
+    for (const r of [...(refs || [])]
+        .filter((x) => x?.imageFile || x?.imageB64)
+        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))) {
+        const index = Number(r.index ?? r.slot ?? 0);
+        items.push({
+            index,
+            kind: "subject",
+            label: `Subject ${index + 1}`,
+            tag: `<Subject ${index + 1}>`,
+            thumb: refThumbUrl(r),
+        });
+    }
     for (const r of [...(refs || [])]
         .filter((x) => x?.imageFile || x?.imageB64)
         .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))) {
@@ -251,6 +272,7 @@ function promptVideosFor(editor, seg, extraVideos) {
 
 function kindFromTagType(type) {
     const k = String(type || "").toLowerCase();
+    if (k === "subject") return "subject";
     if (k === "picture") return "image";
     if (k === "video") return "video";
     if (k === "audio") return "audio";
@@ -259,6 +281,7 @@ function kindFromTagType(type) {
 
 function tagFor(kind, ordinal1) {
     const n = Math.max(1, Number(ordinal1) || 1);
+    if (kind === "subject") return `<Subject ${n}>`;
     if (kind === "video") return refVideoPromptTag(n - 1);
     if (kind === "audio") return refAudioPromptTag(n - 1);
     return refImagePromptTag(n - 1);
@@ -266,6 +289,7 @@ function tagFor(kind, ordinal1) {
 
 function labelFor(kind, ordinal1) {
     const n = Math.max(1, Number(ordinal1) || 1);
+    if (kind === "subject") return `Subject ${n}`;
     if (kind === "video") return refVideoLabel(n - 1);
     if (kind === "audio") return refAudioLabel(n - 1);
     return refImageLabel(n - 1);
@@ -306,7 +330,7 @@ function makeTokenChip(kind, ordinal1, mediaItem, { onActivate } = {}) {
     } else {
         const glyph = document.createElement("span");
         glyph.className = "bd-token-glyph";
-        glyph.textContent = kind === "video" ? "▶" : kind === "audio" ? "♪" : "▣";
+        glyph.textContent = kind === "video" ? "▶" : kind === "audio" ? "♪" : kind === "subject" ? "👤" : "▣";
         chip.appendChild(glyph);
     }
 
@@ -547,9 +571,9 @@ function insertAtCaret(editor, insertText, getMedia, options, { replaceFrom = nu
 // Serialized tag-string deletes: contenteditable=false chips make native caret
 // positions unreliable (element-level before a chip, text-node start after a
 // chip, Home / arrow landings). Operate on official tags as atomic units.
-const SERIAL_TAG_AT = /^<(?:Picture|Video|Audio)\s+\d+\s*>/i;
-const SERIAL_TAG_BEFORE = /<(?:Picture|Video|Audio)\s+\d+\s*>$/i;
-const SERIAL_TAG_GLOBAL = /<(?:Picture|Video|Audio)\s+\d+\s*>/gi;
+const SERIAL_TAG_AT = /^<(?:Subject|Picture|Video|Audio)\s+\d+\s*>/i;
+const SERIAL_TAG_BEFORE = /<(?:Subject|Picture|Video|Audio)\s+\d+\s*>$/i;
+const SERIAL_TAG_GLOBAL = /<(?:Subject|Picture|Video|Audio)\s+\d+\s*>/gi;
 
 /** Delete key (forward). Returns {text, caret} or null if nothing to delete. */
 function serializedDeleteForward(full, offset) {
@@ -971,6 +995,7 @@ export function wirePromptImageMentions(editorHost, textarea, getMedia) {
             const label = String(item.label || "").toLowerCase();
             const tag = String(item.tag || "").toLowerCase();
             return label.includes(q) || tag.includes(q)
+                || (item.kind === "subject" && `subject ${item.index + 1}`.includes(q))
                 || (item.kind === "image" && `picture ${item.index + 1}`.includes(q))
                 || (item.kind === "video" && `video ${item.index + 1}`.includes(q))
                 || (item.kind === "audio" && `audio ${item.index + 1}`.includes(q));
