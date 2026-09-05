@@ -176,6 +176,74 @@ function resolveCharacterDetailLevel(pe, opts) {
     return resolveCharacterFeatureEnhance(pe, opts) ? CHARACTER_DETAIL_DETAILED : "一般";
 }
 
+/**
+ * Show r2v AI script import dialog (extracted to reduce mountPromptEnhancerPanel divergence).
+ * @param {Object} pe - Prompt enhancer panel instance
+ */
+function showR2vImportDialog(pe) {
+    const overlay = el({
+        position: "fixed", top: "0", left: "0", right: "0", bottom: "0",
+        background: "rgba(0,0,0,.7)", zIndex: "10000",
+        display: "flex", alignItems: "center", justifyContent: "center",
+    });
+    const dialog = el({
+        background: "#1a1a1a", border: "1px solid #333", borderRadius: "8px",
+        padding: "16px", width: "90%", maxWidth: "600px", maxHeight: "80vh",
+        display: "flex", flexDirection: "column", gap: "12px",
+    });
+    const title = el({ fontSize: "14px", fontWeight: "600", color: "#4fff8f" }, t("r2v.import.title"));
+    const hint = el({ fontSize: "11px", color: "#888", lineHeight: "1.4", whiteSpace: "pre-wrap" }, t("r2v.import.hint"));
+    const textarea = document.createElement("textarea");
+    Object.assign(textarea.style, {
+        width: "100%", minHeight: "200px", padding: "10px",
+        background: "#12151b", color: "#d6dbe6", border: "1px solid #2a3140",
+        borderRadius: "4px", fontSize: "11px", fontFamily: "monospace",
+        resize: "vertical", outline: "none",
+    });
+    textarea.placeholder = t("r2v.import.placeholder");
+    const btnRow = el({ display: "flex", gap: "8px", justifyContent: "flex-end" });
+    const cancelBtn = el({
+        padding: "6px 16px", background: "#333", color: "#ddd",
+        border: "1px solid #444", borderRadius: "4px", cursor: "pointer", fontSize: "11px",
+    }, t("r2v.import.cancel"), "button");
+    cancelBtn.onclick = () => overlay.remove();
+    const importBtn = el({
+        padding: "6px 16px", background: "#8b5cf6", color: "#fff",
+        border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontWeight: "600",
+    }, t("r2v.import.confirm"), "button");
+    importBtn.onclick = () => {
+        const input = textarea.value.trim();
+        if (!input) {
+            pe.setStatus(t("r2v.import.empty"), "error");
+            return;
+        }
+        const parsed = parseR2vSections(input);
+        if (!parsed) {
+            pe.setStatus(t("r2v.import.parseError"), "error");
+            return;
+        }
+        if (pe.sectionsEditor) {
+            pe.sectionsEditor.setSections(parsed);
+        }
+        const text = assembleR2vSections(parsed, false);
+        pe.setActivePromptText(text);
+        overlay.remove();
+        pe.setStatus(t("r2v.import.success"), "success");
+    };
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(importBtn);
+    dialog.appendChild(title);
+    dialog.appendChild(hint);
+    dialog.appendChild(textarea);
+    dialog.appendChild(btnRow);
+    overlay.appendChild(dialog);
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) overlay.remove();
+    });
+    document.body.appendChild(overlay);
+    textarea.focus();
+}
+
 export function mountPromptEnhancerPanel(editor, parentEl) {
     ensurePeStyles();
     const pe = { editor, open: false, _currentDefaultTemplate: "", _busy: false };
@@ -525,96 +593,33 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     };
 
     /** Show AI script import dialog. */
-    pe.showImportDialog = () => {
-        // Create modal overlay
-        const overlay = el({
-            position: "fixed", top: "0", left: "0", right: "0", bottom: "0",
-            background: "rgba(0,0,0,.7)", zIndex: "10000",
-            display: "flex", alignItems: "center", justifyContent: "center",
-        });
-        const dialog = el({
-            background: "#1a1a1a", border: "1px solid #333", borderRadius: "8px",
-            padding: "16px", width: "90%", maxWidth: "600px", maxHeight: "80vh",
-            display: "flex", flexDirection: "column", gap: "12px",
-        });
-        const title = el({ fontSize: "14px", fontWeight: "600", color: "#4fff8f" }, t("r2v.import.title"));
-        const hint = el({ fontSize: "11px", color: "#888", lineHeight: "1.4", whiteSpace: "pre-wrap" }, t("r2v.import.hint"));
-        const textarea = document.createElement("textarea");
-        Object.assign(textarea.style, {
-            width: "100%", minHeight: "200px", padding: "10px",
-            background: "#12151b", color: "#d6dbe6", border: "1px solid #2a3140",
-            borderRadius: "4px", fontSize: "11px", fontFamily: "monospace",
-            resize: "vertical", outline: "none",
-        });
-        textarea.placeholder = t("r2v.import.placeholder");
-        const btnRow = el({ display: "flex", gap: "8px", justifyContent: "flex-end" });
-        const cancelBtn = el({
-            padding: "6px 16px", background: "#333", color: "#ddd",
-            border: "1px solid #444", borderRadius: "4px", cursor: "pointer", fontSize: "11px",
-        }, t("r2v.import.cancel"), "button");
-        cancelBtn.onclick = () => overlay.remove();
-        const importBtn = el({
-            padding: "6px 16px", background: "#8b5cf6", color: "#fff",
-            border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontWeight: "600",
-        }, t("r2v.import.confirm"), "button");
-        importBtn.onclick = () => {
-            const input = textarea.value.trim();
-            if (!input) {
-                pe.setStatus(t("r2v.import.empty"), "error");
-                return;
-            }
-            const parsed = parseR2vSections(input);
-            if (!parsed) {
-                pe.setStatus(t("r2v.import.parseError"), "error");
-                return;
-            }
-            // Apply to sections editor
-            if (pe.sectionsEditor) {
-                pe.sectionsEditor.setSections(parsed);
-            }
-            // Also apply to prompt
-            const text = assembleR2vSections(parsed, false);
-            pe.setActivePromptText(text);
-            overlay.remove();
-            pe.setStatus(t("r2v.import.success"), "success");
-        };
-        btnRow.appendChild(cancelBtn);
-        btnRow.appendChild(importBtn);
-        dialog.appendChild(title);
-        dialog.appendChild(hint);
-        dialog.appendChild(textarea);
-        dialog.appendChild(btnRow);
-        overlay.appendChild(dialog);
-        overlay.addEventListener("click", (e) => {
-            if (e.target === overlay) overlay.remove();
-        });
-        document.body.appendChild(overlay);
-        textarea.focus();
+    pe.showImportDialog = () => showR2vImportDialog(pe);
+
+    /** Set common (global) prompt on editor. Encapsulates editor internals. */
+    pe.setEditorCommonPrompt = (text) => {
+        if (editor.globalPrompt) editor.globalPrompt.value = text;
+        if (editor.timeline.global) editor.timeline.global.prompt = text;
+        if (editor.globalPromptWidget) editor.globalPromptWidget.value = text;
+    };
+
+    /** Set segment prompt on editor. Encapsulates editor internals. */
+    pe.setEditorSegmentPrompt = (text, idx) => {
+        const seg = editor.timeline.segments?.[idx];
+        if (seg) seg.prompt = text;
+        if (idx === editor.selectedIndex && editor.segPrompt) {
+            editor.segPrompt.value = text;
+        }
     };
 
     /** Apply split sections to Director common + segment prompts. */
     pe.applySplitToDirector = (common, segment) => {
-        // Common sections → global prompt
         const commonText = assembleR2vSections(common, false);
-        if (editor.globalPrompt) {
-            editor.globalPrompt.value = commonText;
-        }
-        if (editor.timeline.global) {
-            editor.timeline.global.prompt = commonText;
-        }
-        if (editor.globalPromptWidget) {
-            editor.globalPromptWidget.value = commonText;
-        }
-        // Segment sections → current segment prompt
+        pe.setEditorCommonPrompt(commonText);
+
         const segmentText = assembleR2vSections(segment, false);
         const idx = editor.selectedIndex ?? 0;
-        const seg = editor.timeline.segments?.[idx];
-        if (seg) {
-            seg.prompt = segmentText;
-        }
-        if (idx === editor.selectedIndex && editor.segPrompt) {
-            editor.segPrompt.value = segmentText;
-        }
+        pe.setEditorSegmentPrompt(segmentText, idx);
+
         editor.commit?.(false, { syncTimeline: true });
         pe.setStatus(t("r2v.split.success"), "success");
     };

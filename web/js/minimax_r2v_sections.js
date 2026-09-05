@@ -54,6 +54,24 @@ const SECTION_COLORS = {
     non_diegetic_music: "#fbbf24",   // yellow
 };
 
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Count words in a string (whitespace-separated tokens). */
+function countWords(str) {
+    const content = String(str || "").trim();
+    return content ? content.split(/\s+/).filter(Boolean).length : 0;
+}
+
+/** Read all textarea values into sections object (mutates sections). */
+function readTextareasIntoSections(sectionEditors, sections) {
+    for (const name of SECTION_NAMES) {
+        const editor = sectionEditors[name];
+        if (editor) {
+            sections[name] = editor.textarea.value;
+        }
+    }
+}
+
 // ─── Styles ──────────────────────────────────────────────────────────────────
 
 const SECTION_STYLES = `
@@ -310,7 +328,7 @@ export function validateR2vSections(sections) {
 
     for (const name of SECTION_NAMES) {
         const content = String(sections?.[name] || "").trim();
-        const words = content ? content.split(/\s+/).filter(Boolean).length : 0;
+        const words = countWords(content);
         const warnings = [];
 
         // Check for abstract words (official SKILL.md line 39)
@@ -482,7 +500,7 @@ export function createR2vSectionsEditor(options) {
 
     function updateBadge(name, badge) {
         const content = String(sections[name] || "").trim();
-        const words = content ? content.split(/\s+/).filter(Boolean).length : 0;
+        const words = countWords(content);
         if (words > 0) {
             badge.className = "r2v-section-badge filled";
             badge.textContent = `${words} ${t("r2v.sections.words") || "词"}`;
@@ -495,10 +513,7 @@ export function createR2vSectionsEditor(options) {
 
     function updateStats() {
         const filled = SECTION_NAMES.filter(n => String(sections[n] || "").trim()).length;
-        const totalWords = SECTION_NAMES.reduce((sum, n) => {
-            const content = String(sections[n] || "").trim();
-            return sum + (content ? content.split(/\s+/).filter(Boolean).length : 0);
-        }, 0);
+        const totalWords = SECTION_NAMES.reduce((sum, n) => sum + countWords(sections[n]), 0);
         const filledEl = footer.querySelector('[data-stat="filled"]');
         const wordsEl = footer.querySelector('[data-stat="words"]');
         if (filledEl) filledEl.textContent = `${filled}/6`;
@@ -531,13 +546,7 @@ export function createR2vSectionsEditor(options) {
     }
 
     function syncToPrompt() {
-        // Read from textareas first
-        for (const name of SECTION_NAMES) {
-            const editor = sectionEditors[name];
-            if (editor) {
-                sections[name] = editor.textarea.value;
-            }
-        }
+        readTextareasIntoSections(sectionEditors, sections);
         const text = assembleR2vSections(sections, false);
         if (typeof onSetPrompt === "function") {
             onSetPrompt(text);
@@ -545,13 +554,7 @@ export function createR2vSectionsEditor(options) {
     }
 
     function splitToDirector() {
-        // Read from textareas first
-        for (const name of SECTION_NAMES) {
-            const editor = sectionEditors[name];
-            if (editor) {
-                sections[name] = editor.textarea.value;
-            }
-        }
+        readTextareasIntoSections(sectionEditors, sections);
         const { common, segment } = splitSectionsForDirector(sections);
         if (typeof onSplitToDirector === "function") {
             onSplitToDirector(common, segment);

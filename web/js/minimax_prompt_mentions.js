@@ -165,20 +165,24 @@ function makeMentionMenuThumb(item) {
     thumb.className = `bd-mention-thumb bd-mention-thumb-${kind}`;
     thumb.setAttribute("aria-hidden", "true");
     // Simple geometric icons — match image thumb size, no external assets.
-    if (kind === "video") thumb.textContent = "▶";
-    else if (kind === "audio") thumb.textContent = "♪";
-    else if (kind === "subject") thumb.textContent = "👤";
-    else thumb.textContent = "▣";
+    thumb.textContent = glyphFor(kind);
     return thumb;
+}
+
+/** Get sorted reference images (shared by Subject and Picture groups). */
+function getSortedRefs(refs) {
+    return [...(refs || [])]
+        .filter((x) => x?.imageFile || x?.imageB64)
+        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0));
 }
 
 function listAvailableMentions(refs, audios, videos) {
     const items = [];
+    const sortedRefs = getSortedRefs(refs);
+
     // Subject group: derived from refs (each reference image can map to a Subject).
     // Subjects are reusable visible-content units defined in subject_definitions.
-    for (const r of [...(refs || [])]
-        .filter((x) => x?.imageFile || x?.imageB64)
-        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))) {
+    for (const r of sortedRefs) {
         const index = Number(r.index ?? r.slot ?? 0);
         items.push({
             index,
@@ -188,9 +192,8 @@ function listAvailableMentions(refs, audios, videos) {
             thumb: refThumbUrl(r),
         });
     }
-    for (const r of [...(refs || [])]
-        .filter((x) => x?.imageFile || x?.imageB64)
-        .sort((a, b) => Number(a.index ?? a.slot ?? 0) - Number(b.index ?? b.slot ?? 0))) {
+    // Picture group: same refs, different kind/label/tag.
+    for (const r of sortedRefs) {
         const index = Number(r.index ?? r.slot ?? 0);
         items.push({
             index,
@@ -270,29 +273,61 @@ function promptVideosFor(editor, seg, extraVideos) {
     ];
 }
 
+// ─── Kind Configuration Map ──────────────────────────────────────────────────
+// Centralizes all kind-specific behavior to avoid repeated if-cascades.
+
+const KIND_CONFIG = {
+    subject: {
+        glyph: "👤",
+        tagType: "subject",
+        tag: (n) => `<Subject ${n}>`,
+        label: (n) => `Subject ${n}`,
+    },
+    image: {
+        glyph: "▣",
+        tagType: "picture",
+        tag: (n) => refImagePromptTag(n - 1),
+        label: (n) => refImageLabel(n - 1),
+    },
+    video: {
+        glyph: "▶",
+        tagType: "video",
+        tag: (n) => refVideoPromptTag(n - 1),
+        label: (n) => refVideoLabel(n - 1),
+    },
+    audio: {
+        glyph: "♪",
+        tagType: "audio",
+        tag: (n) => refAudioPromptTag(n - 1),
+        label: (n) => refAudioLabel(n - 1),
+    },
+};
+
+/** Reverse map: tagType → kind. */
+const TAG_TYPE_TO_KIND = Object.fromEntries(
+    Object.entries(KIND_CONFIG).map(([kind, cfg]) => [cfg.tagType, kind])
+);
+
 function kindFromTagType(type) {
     const k = String(type || "").toLowerCase();
-    if (k === "subject") return "subject";
-    if (k === "picture") return "image";
-    if (k === "video") return "video";
-    if (k === "audio") return "audio";
-    return "image";
+    return TAG_TYPE_TO_KIND[k] || "image";
 }
 
 function tagFor(kind, ordinal1) {
     const n = Math.max(1, Number(ordinal1) || 1);
-    if (kind === "subject") return `<Subject ${n}>`;
-    if (kind === "video") return refVideoPromptTag(n - 1);
-    if (kind === "audio") return refAudioPromptTag(n - 1);
-    return refImagePromptTag(n - 1);
+    const cfg = KIND_CONFIG[kind] || KIND_CONFIG.image;
+    return cfg.tag(n);
 }
 
 function labelFor(kind, ordinal1) {
     const n = Math.max(1, Number(ordinal1) || 1);
-    if (kind === "subject") return `Subject ${n}`;
-    if (kind === "video") return refVideoLabel(n - 1);
-    if (kind === "audio") return refAudioLabel(n - 1);
-    return refImageLabel(n - 1);
+    const cfg = KIND_CONFIG[kind] || KIND_CONFIG.image;
+    return cfg.label(n);
+}
+
+function glyphFor(kind) {
+    const cfg = KIND_CONFIG[kind] || KIND_CONFIG.image;
+    return cfg.glyph;
 }
 
 function findMentionItem(items, kind, ordinal1) {
@@ -330,7 +365,7 @@ function makeTokenChip(kind, ordinal1, mediaItem, { onActivate } = {}) {
     } else {
         const glyph = document.createElement("span");
         glyph.className = "bd-token-glyph";
-        glyph.textContent = kind === "video" ? "▶" : kind === "audio" ? "♪" : kind === "subject" ? "👤" : "▣";
+        glyph.textContent = glyphFor(kind);
         chip.appendChild(glyph);
     }
 
