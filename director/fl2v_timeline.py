@@ -545,6 +545,7 @@ def build_fl2v_director_plan(
         SegmentRef,
         _parse_run_selection,
         _resolve_export_mode,
+        _resolve_merge_only,
     )
 
     global_block = timeline.get("global") or {}
@@ -572,10 +573,13 @@ def build_fl2v_director_plan(
                 "fl2v: 没有可用的组。请添加一组（可只写提示词，或上传首帧/尾帧）。"
             )
 
+    # 「仅合并缓存」: skip sampling, stream merged.mp4 straight from the disk cache.
+    merge_only = _resolve_merge_only(timeline)
     # runSelection uses shot indices when shots[] is present; else keyframe indices.
     # Keep full shot list for continuity neighbors; honor selection via run_indices.
+    # merge_only ignores「选择运行」(mutually exclusive) — merge every cached segment.
     run_count = len(timeline.get("shots") or []) if used_explicit_shots else len(keyframes)
-    run_sel = _parse_run_selection(timeline, max(1, run_count))
+    run_sel = None if merge_only else _parse_run_selection(timeline, max(1, run_count))
     if run_sel is not None:
         if not any(int(s["source_index"]) in run_sel for s in shots):
             raise ValueError(
@@ -610,6 +614,9 @@ def build_fl2v_director_plan(
     assert_minimax_canvas(out_w, out_h)
 
     export_mode = _resolve_export_mode(output_block)
+    if merge_only:
+        # new_segment_mp4_run_dir only creates the seg_export run dir in "segments".
+        export_mode = "segments"
     fallback_prompt = (global_block.get("prompt") or global_prompt or "").strip()
     fallback_negative = (
         global_block.get("negativePrompt")
@@ -760,6 +767,7 @@ def build_fl2v_director_plan(
         edit_mode="segment",
         raw=raw,
         export_mode=export_mode,
+        merge_only=merge_only,
         run_indices=run_indices,
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,

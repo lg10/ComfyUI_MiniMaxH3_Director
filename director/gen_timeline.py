@@ -359,6 +359,7 @@ def build_gen_director_plan(
         _load_refs,
         _parse_run_selection,
         _resolve_export_mode,
+        _resolve_merge_only,
         concat_common_segment_prompt,
         merge_indexed_refs,
         resolve_ref_image_size,
@@ -443,6 +444,12 @@ def build_gen_director_plan(
     # Image prompt-batch (t2i/i2i/r2i) always merges to images list; video batch (t2v/i2v/r2v) respects export mode.
     if is_prompt_batch_timeline(timeline, task_key) and not is_video_batch_task_key(task_key):
         export_mode = "all"
+    # 「仅合并缓存」: skip sampling, stream merged.mp4 straight from the disk cache.
+    # Needs the seg_export run dir, which new_segment_mp4_run_dir only creates in
+    # "segments" mode — force it regardless of the UI export-mode widget.
+    merge_only = _resolve_merge_only(timeline)
+    if merge_only:
+        export_mode = "segments"
 
     if submode == "gen_blank":
         source_clips = []
@@ -674,7 +681,8 @@ def build_gen_director_plan(
         edit_mode=edit_mode,
         raw=raw,
         export_mode=export_mode,
-        run_indices=_parse_run_selection(timeline, len(segments)),
+        merge_only=merge_only,
+        run_indices=None if merge_only else _parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
         global_ref_audios=shared_ref_audios,

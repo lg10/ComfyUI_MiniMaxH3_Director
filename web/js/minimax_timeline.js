@@ -1030,6 +1030,7 @@ const STYLES = `
 .bd-btn-del-split:hover{background:#4a1515;border-color:#f88;color:#fcc}
 .bd-btn-sm{padding:3px 8px;font-size:10px}
 .bd-btn-run-select.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
+.bd-btn-merge-only.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
 .bd-output .bd-btn-live-preview{margin-left:auto;background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px}
 .bd-output .bd-btn-live-preview:hover{background:#2a2a2a;border-color:#555;color:#ddd}
 .bd-output .bd-btn-live-preview.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
@@ -2713,7 +2714,7 @@ class MiniMaxH3DirectorEditor {
                     <button type="button" class="bd-btn" data-a="equal" data-i18n="toolbar.equalSplit">均分</button>
                     <button type="button" class="bd-btn" data-a="smart-split" data-i18n="toolbar.smartSplit" data-i18n-title="tooltip.smartSplit">智能分割</button>
                     <button type="button" class="bd-btn" data-a="run-select-toggle" data-i18n="toolbar.runSelect" data-i18n-title="tooltip.runSelect">选择运行</button>
-                    <button type="button" class="bd-btn" data-a="merge-only-toggle" data-i18n="toolbar.mergeOnly" data-i18n-title="tooltip.mergeOnly">仅合并缓存</button>
+                    <button type="button" class="bd-btn bd-btn-merge-only" data-a="merge-only-toggle" data-i18n="toolbar.mergeOnly" data-i18n-title="tooltip.mergeOnly">仅合并缓存</button>
                     <label class="bd-run-select-all-wrap hidden" data-r="run-select-all-wrap" data-i18n-title="tooltip.runSelectAll">
                         <input type="checkbox" data-r="run-select-all-cb">
                         <span data-i18n="toolbar.selectAll">全选</span>
