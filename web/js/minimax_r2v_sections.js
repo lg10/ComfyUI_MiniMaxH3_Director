@@ -11,6 +11,7 @@
  */
 
 import { t } from "./minimax_i18n.js";
+import { teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -69,14 +70,45 @@ function countWords(str) {
 }
 
 /** Read all textarea values into sections object (mutates sections).
- *  Iterates only over mounted editors so subset mode (common/segment) works. */
+ *  Iterates only over mounted editors so subset mode (common/segment) works.
+ *  Chip editors lag their textarea by ~80ms (debounced tag rehydrate) — flush
+ *  them first, otherwise a card rebuild drops the last few keystrokes. */
 function readTextareasIntoSections(sectionEditors, sections) {
     for (const name of Object.keys(sectionEditors)) {
         const editor = sectionEditors[name];
         if (editor) {
+            editor.textarea.__bdTokenApi?.sync?.();
             sections[name] = editor.textarea.value;
         }
     }
+}
+
+/** Copy text without relying on navigator.clipboard (canvas widgets may be
+ *  served over plain http, where the async clipboard API is unavailable). */
+function copyTextToClipboard(text) {
+    const value = String(text ?? "");
+    if (navigator.clipboard?.writeText) {
+        return navigator.clipboard.writeText(value).then(() => true, () => legacyCopy(value));
+    }
+    return Promise.resolve(legacyCopy(value));
+}
+
+function legacyCopy(value) {
+    const ta = document.createElement("textarea");
+    ta.value = value;
+    // Off-screen but focusable; execCommand needs a live selection.
+    ta.setAttribute("readonly", "");
+    Object.assign(ta.style, { position: "fixed", top: "-1000px", opacity: "0" });
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+        ok = document.execCommand("copy");
+    } catch {
+        ok = false;
+    }
+    ta.remove();
+    return ok;
 }
 
 // ─── Styles ──────────────────────────────────────────────────────────────────
@@ -152,7 +184,50 @@ const SECTION_STYLES = `
 .r2v-sections-toggle.active{background:#1a3a2a;border-color:#4fff8f;color:#4fff8f}
 .r2v-sections-toggle .icon{font-size:14px}
 .r2v-sections-collapsed .r2v-sections-panel{display:none}
-`;
+
+/* Section rows host a compact chip editor once @-mentions are wired. */
+.r2v-section-item>.bd-token-wrap.bd-token-compact{flex:0 0 auto;width:100%}
+
+/* Collapsible raw-prompt view. r2v keeps the six-section editor as the only
+   primary surface; the chip editor stays reachable but folded, and its edits
+   never flow back into the sections. */
+.bd-r2v-full{display:flex;flex-direction:column;gap:4px;min-width:0;width:100%}
+.bd-r2v-full-toggle{
+  display:flex;align-items:center;gap:6px;align-self:flex-start;
+  padding:4px 10px;background:#252525;border:1px solid #333;border-radius:6px;
+  cursor:pointer;font-size:11px;color:#ddd;transition:all .15s
+}
+.bd-r2v-full-toggle:hover{border-color:#4fff8f;color:#4fff8f}
+.bd-r2v-full-toggle .caret{font-size:9px;color:#888;transition:transform .15s}
+.bd-r2v-full:not(.collapsed) .bd-r2v-full-toggle{background:#1a3a2a;border-color:#4fff8f;color:#4fff8f}
+.bd-r2v-full:not(.collapsed) .bd-r2v-full-toggle .caret{transform:rotate(90deg);color:#4fff8f}
+.bd-r2v-full.collapsed .bd-r2v-full-body{display:none}
+/* Non-r2v modes reuse the same shell as a plain, always-open prompt box: the
+   toggle and the warning are r2v-only chrome. Keeping the wrap permanently
+   nested here means it never has to be moved back. */
+.bd-r2v-full.is-plain>.bd-r2v-full-toggle,
+.bd-r2v-full.is-plain .bd-r2v-full-warn,
+.bd-r2v-full.is-plain .bd-r2v-final{display:none}
+.bd-r2v-full.is-plain>.bd-r2v-full-body{display:flex}
+.bd-r2v-full-body{display:flex;flex-direction:column;gap:6px;min-width:0;width:100%}
+.bd-r2v-full-warn{
+  font-size:10px;line-height:1.45;color:#e8a23a;
+  background:#2a2010;border:1px solid #5a4530;border-radius:4px;padding:5px 8px
+}
+.bd-r2v-final{display:flex;flex-direction:column;gap:4px;min-width:0}
+.bd-r2v-final-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.bd-r2v-final-title{font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#888}
+.bd-r2v-final-copy{
+  padding:2px 8px;font-size:10px;border-radius:4px;cursor:pointer;
+  border:1px solid #444;background:#252525;color:#ddd;transition:all .15s
+}
+.bd-r2v-final-copy:hover{border-color:#4fff8f;color:#4fff8f}
+.bd-r2v-final-pre{
+  margin:0;padding:8px;max-height:220px;overflow:auto;
+  background:#101010;border:1px solid #2e2e2e;border-radius:6px;
+  color:#c8ffd9;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  line-height:1.5;white-space:pre-wrap;word-break:break-word;user-select:text
+}`;
 
 let stylesInjected = false;
 
@@ -316,6 +391,17 @@ export function splitSectionsForDirector(sections) {
     return { common: pick(COMMON_SECTIONS), segment: pick(SEGMENT_SECTIONS) };
 }
 
+// ─── Final Prompt Mirror ─────────────────────────────────────────────────────
+// The backend rewrites seg.prompt twice before it reaches the model. Mirroring
+// both steps keeps the read-only preview honest instead of approximate. Lives in
+// its own dependency-free module so it can be diffed against the Python
+// originals directly under node; re-exported here for discoverability.
+export {
+    buildR2vFinalPrompt,
+    concatCommonSegmentPrompt,
+    reinforceR2vPrompt,
+} from "./minimax_r2v_final_prompt.js";
+
 // ─── Validation ──────────────────────────────────────────────────────────────
 
 /**
@@ -457,7 +543,15 @@ function showR2vImportDialog(onImport) {
  * @returns {Object} - Editor API { refresh, getSections, setSections, destroy }
  */
 export function createR2vSectionsEditor(options) {
-    const { container, onGetPrompt, onSetPrompt, onSplitToDirector, sectionNames } = options;
+    const {
+        container,
+        onGetPrompt,
+        onSetPrompt,
+        onSplitToDirector,
+        sectionNames,
+        editorHost,
+        getMedia,
+    } = options;
     if (!container) return null;
 
     injectStyles();
@@ -471,6 +565,10 @@ export function createR2vSectionsEditor(options) {
     let sections = {};
     let isCollapsed = false;
     let syncTimer = null;
+    // Set once the user actually changes section content. flush()/destroy() are
+    // no-ops while it is false: an untouched editor holds whatever the parser
+    // could recognise, so writing it back would erase unparseable prompt text.
+    let dirty = false;
 
     // Build DOM
     const wrapper = document.createElement("div");
@@ -555,6 +653,7 @@ export function createR2vSectionsEditor(options) {
         // Debounced sync on input
         textarea.addEventListener("input", () => {
             sections[name] = textarea.value;
+            dirty = true;
             updateBadge(name, badge);
             scheduleSyncToPrompt();
         });
@@ -562,6 +661,12 @@ export function createR2vSectionsEditor(options) {
         item.appendChild(itemHeader);
         item.appendChild(textarea);
         panel.appendChild(item);
+
+        // @-mentions + official-tag chips, same surface as the raw prompt editor.
+        // Must run after the textarea is in the DOM (ensureTokenShell reparents).
+        if (typeof getMedia === "function") {
+            wirePromptImageMentions(editorHost, textarea, getMedia, { compact: true });
+        }
 
         sectionEditors[name] = { textarea, badge, item };
     }
@@ -599,8 +704,9 @@ export function createR2vSectionsEditor(options) {
     }
 
     /** Replace sections (filtered to activeNames), refresh textareas + badges. */
-    function applySections(newSections) {
+    function applySections(newSections, markDirty = true) {
         sections = assignActive(newSections);
+        if (markDirty) dirty = true;
         for (const name of activeNames) {
             const editor = sectionEditors[name];
             if (editor) {
@@ -645,7 +751,10 @@ export function createR2vSectionsEditor(options) {
     function syncFromPrompt() {
         const text = typeof onGetPrompt === "function" ? onGetPrompt() : "";
         const parsed = parseR2vSections(text);
-        if (parsed) applySections(parsed);
+        // Pulling canonical text in is not a user edit — the parser only
+        // recognises its own formats, so echoing the result back could drop
+        // whatever the prompt said before.
+        if (parsed) applySections(parsed, false);
     }
 
     function syncToPrompt() {
@@ -654,6 +763,19 @@ export function createR2vSectionsEditor(options) {
         if (typeof onSetPrompt === "function") {
             onSetPrompt(text);
         }
+    }
+
+    /**
+     * Write the pending debounced sync out now — called before DOM teardown.
+     * No-op until the user has actually edited a section: an untouched editor
+     * only holds what parseR2vSections recognised, and echoing that back would
+     * wipe prompt text the parser does not understand.
+     */
+    function flushPendingSync() {
+        clearTimeout(syncTimer);
+        syncTimer = null;
+        if (!dirty) return;
+        syncToPrompt();
     }
 
     function splitToDirector() {
@@ -714,7 +836,12 @@ export function createR2vSectionsEditor(options) {
 
         /** Destroy editor and remove from DOM. */
         destroy: () => {
-            clearTimeout(syncTimer);
+            // Flush before teardown: the chip editors' sync() needs live DOM, and
+            // a mode switch inside the 300ms debounce would otherwise eat the
+            // last keystrokes.
+            flushPendingSync();
+            // Drop the chip editors' document/window listeners before the DOM goes.
+            teardownPromptImageMentions(wrapper);
             wrapper.remove();
         },
 
@@ -726,12 +853,110 @@ export function createR2vSectionsEditor(options) {
         },
 
         /** Immediately flush any debounced sync (call before DOM teardown). */
-        flush: () => {
-            clearTimeout(syncTimer);
-            syncTimer = null;
-            syncToPrompt();
-        },
+        flush: flushPendingSync,
     };
+}
+
+// ─── Collapsible Raw Prompt View ─────────────────────────────────────────────
+
+/**
+ * Fold the raw chip editor (the prompt textarea's existing .bd-token-wrap)
+ * behind a toggle, so r2v shows the six-section editor as the only primary
+ * surface. Edits here write straight to the canonical prompt field and are
+ * NEVER parsed back into the sections — hence the warning strip.
+ *
+ * @param {Object} options
+ * @param {HTMLElement} options.tokenWrap - the textarea's .bd-token-wrap; moved into the body
+ * @param {Function} [options.getPreviewText] - () => string. When provided, a
+ *        read-only "what the model actually receives" block is rendered.
+ * @param {string} [options.warnKey="r2v.full.warn"] - i18n key for the warning strip
+ * @param {boolean} [options.collapsed=true]
+ * @returns {{root: HTMLElement, setCollapsed: Function, refreshPreview: Function}}
+ */
+export function createR2vFullPromptView(options = {}) {
+    const { tokenWrap, getPreviewText, warnKey = "r2v.full.warn", collapsed = true } = options;
+    injectStyles();
+
+    const root = document.createElement("div");
+    root.className = "bd-r2v-full";
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "bd-r2v-full-toggle";
+    const caret = document.createElement("span");
+    caret.className = "caret";
+    caret.setAttribute("aria-hidden", "true");
+    caret.textContent = "\u25b6";
+    const toggleLabel = document.createElement("span");
+    toggleLabel.setAttribute("data-i18n", "r2v.full.toggle");
+    toggleLabel.textContent = t("r2v.full.toggle");
+    toggle.append(caret, toggleLabel);
+
+    const body = document.createElement("div");
+    body.className = "bd-r2v-full-body";
+
+    const warn = document.createElement("div");
+    warn.className = "bd-r2v-full-warn";
+    warn.setAttribute("data-i18n", warnKey);
+    warn.textContent = t(warnKey);
+    body.appendChild(warn);
+
+    if (tokenWrap) body.appendChild(tokenWrap);
+
+    let previewPre = null;
+    if (typeof getPreviewText === "function") {
+        const box = document.createElement("div");
+        box.className = "bd-r2v-final";
+        const head = document.createElement("div");
+        head.className = "bd-r2v-final-head";
+        const title = document.createElement("span");
+        title.className = "bd-r2v-final-title";
+        title.setAttribute("data-i18n", "r2v.final.title");
+        title.textContent = t("r2v.final.title");
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "bd-r2v-final-copy";
+        copyBtn.setAttribute("data-i18n", "r2v.final.copy");
+        copyBtn.textContent = t("r2v.final.copy");
+        head.append(title, copyBtn);
+        previewPre = document.createElement("pre");
+        previewPre.className = "bd-r2v-final-pre";
+        box.append(head, previewPre);
+        body.appendChild(box);
+
+        copyBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void copyTextToClipboard(previewPre.textContent || "").then((ok) => {
+                if (!ok) return;
+                copyBtn.textContent = t("r2v.final.copied");
+                setTimeout(() => { copyBtn.textContent = t("r2v.final.copy"); }, 1200);
+            });
+        });
+    }
+
+    root.append(toggle, body);
+
+    function refreshPreview() {
+        if (!previewPre || root.classList.contains("collapsed")) return;
+        previewPre.textContent = getPreviewText() || "";
+    }
+
+    function setCollapsed(next) {
+        root.classList.toggle("collapsed", !!next);
+        toggle.setAttribute("aria-expanded", next ? "false" : "true");
+        if (!next) refreshPreview();
+    }
+
+    toggle.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setCollapsed(!root.classList.contains("collapsed"));
+    });
+
+    setCollapsed(collapsed);
+
+    return { root, setCollapsed, refreshPreview };
 }
 
 // ─── Template Generation ─────────────────────────────────────────────────────

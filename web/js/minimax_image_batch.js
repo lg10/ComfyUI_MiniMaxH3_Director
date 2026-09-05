@@ -36,7 +36,12 @@ import {
     safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import { refreshPromptTokenEditors, teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
-import { createR2vSectionsEditor, SEGMENT_SECTIONS } from "./minimax_r2v_sections.js";
+import {
+    buildR2vFinalPrompt,
+    createR2vFullPromptView,
+    createR2vSectionsEditor,
+    SEGMENT_SECTIONS,
+} from "./minimax_r2v_sections.js";
 import { t } from "./minimax_i18n.js";
 import { createFl2vSlotPair, normalizeImageRef } from "./minimax_fl2v.js";
 import {
@@ -373,14 +378,17 @@ export function flushBatchPromptInputs(editor) {
     if (!list) return;
     const segs = editor?.timeline?.segments;
     if (!Array.isArray(segs) || !segs.length) return;
-    // r2v: six-section editors own seg.prompt — flush their debounced sync first.
-    list.querySelectorAll(".bd-r2v-sections-host").forEach((host) => {
-        host.__r2vSectionsEditor?.flush?.();
-    });
     list.querySelectorAll("textarea[data-batch-prompt-index]").forEach((el) => {
-        // r2v: plain textarea is hidden; seg.prompt already flushed from the editor.
-        if (el.dataset.batchR2vHidden === "1") return;
+        // Chip editors lag their textarea by ~80ms (debounced tag rehydrate) —
+        // close that gap before anything reads .value or the DOM is rebuilt.
         el.__bdTokenApi?.sync?.();
+        // r2v: the six-section editor owns seg.prompt, unless the folded raw
+        // view was edited more recently — then the raw text is authoritative
+        // and flushing the sections would silently discard it.
+        const rawEdited = el.dataset.batchR2vRawEdited === "1";
+        const host = el.closest(".bd-batch-prompts")?.querySelector(".bd-r2v-sections-host");
+        if (host && !rawEdited) host.__r2vSectionsEditor?.flush?.();
+        if (el.dataset.batchR2vHidden === "1" && !rawEdited) return;
         const live = liveBatchSegmentFromEl(editor, el, "data-batch-prompt-index");
         if (!live?.seg) return;
         live.seg.prompt = el.value || "";
@@ -591,11 +599,15 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-prompts .bd-label{color:#888;font-size:10px}
 .bd-batch-r2v .bd-batch-prompts{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;gap:6px;flex:1 1 auto;min-height:380px;display:flex;flex-direction:column}
 .bd-batch-r2v .bd-batch-prompts .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
-.bd-batch-prompts textarea,.bd-batch-prompts .bd-token-wrap{width:100%;min-height:88px;box-sizing:border-box}
+.bd-batch-prompts textarea,.bd-batch-prompts .bd-token-wrap{width:100%;box-sizing:border-box}
+/* r2v six-section rows own their own sizing: their wraps carry .bd-token-compact
+   and their textareas are the invisible .bd-token-source, so both are excluded
+   from every grow-the-prompt-box rule below. */
+.bd-batch-prompts textarea:not(.bd-token-source),.bd-batch-prompts .bd-token-wrap:not(.bd-token-compact){min-height:88px}
 .bd-batch-prompts textarea{background:#181818;border:1px solid #333;border-radius:4px;color:#eee;padding:6px;resize:vertical;font-size:11px;font-family:inherit;line-height:1.35}
 .bd-batch-plain .bd-batch-prompts textarea,.bd-batch-source .bd-batch-prompts textarea,
 .bd-batch-plain .bd-batch-prompts .bd-token-wrap,.bd-batch-source .bd-batch-prompts .bd-token-wrap{min-height:120px;height:100%;resize:vertical;overflow:auto}
-.bd-batch-r2v .bd-batch-prompts textarea,.bd-batch-r2v .bd-batch-prompts .bd-token-wrap{min-height:360px;height:100%;flex:1;resize:vertical;overflow:auto}
+.bd-batch-r2v .bd-batch-prompts textarea:not(.bd-token-source),.bd-batch-r2v .bd-batch-prompts .bd-token-wrap:not(.bd-token-compact){min-height:360px;height:100%;flex:1;resize:vertical;overflow:auto}
 .bd-batch-r2v .bd-batch-prompts textarea{background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
 .bd-batch-preview{background:#0d0d0d;border:1px solid #333;border-radius:4px;min-height:100px;display:flex;flex-direction:column;align-items:stretch;justify-content:center;overflow:hidden;color:#555;font-size:10px;text-align:center;padding:4px;box-sizing:border-box}
 .bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{width:100%;max-width:220px;min-height:160px;justify-self:end}
@@ -2804,51 +2816,71 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             editor.writeExternalGroupPrompt?.(segIndex, live.prompt);
         };
         if (isR2v) {
-            wirePromptImageMentions(editor, promptEl, () => {
-                const g = editor.timeline?.global || {};
-                const on = !!(g.commonEnabled ?? g.common_enabled);
-                const live = (editor.timeline.segments || []).find((s) => s?.id && s.id === segId)
-                    || editor.timeline.segments?.[segIndex]
-                    || seg;
-                // Absolute indices: common 图片1…N + group 图片N+1… (no renumber clash).
-                return {
-                    refs: on ? mergeMediaByIndex(g.refs || [], live.refs || []) : (live.refs || []),
-                    audios: on
-                        ? mergeMediaByIndex(g.refAudios || [], live.refAudios || [])
-                        : (live.refAudios || []),
-                    videos: on
-                        ? mergeMediaByIndex(g.refVideos || [], live.refVideos || [])
-                        : (live.refVideos || []),
-                };
-            });
-
-            // r2v: replace the plain textarea with a six-section editor holding the
-            // last three sections (detailed_description / overall_soundscape /
-            // non_diegetic_music). The hidden textarea keeps mention wiring alive and
-            // mirrors the assembled text so flushBatchPromptInputs stays consistent.
-            promptEl.dataset.batchR2vHidden = "1";
-            promptEl.style.display = "none";
-            const sectionsHost = document.createElement("div");
-            sectionsHost.className = "bd-r2v-sections-host";
-            prompts.appendChild(sectionsHost);
             const liveSeg = () => (editor.timeline.segments || []).find((s) => s?.id && s.id === segId)
                 || editor.timeline.segments?.[segIndex]
                 || seg;
+            // Absolute indices: common 图片1…N + group 图片N+1… (no renumber clash).
+            // Shared by the @-menu, the section chip editors and the final preview
+            // so all three agree on which slots exist.
+            const segMedia = () => {
+                const g = editor.timeline?.global || {};
+                const on = !!(g.commonEnabled ?? g.common_enabled);
+                const live = liveSeg();
+                return {
+                    refs: on ? mergeMediaByIndex(g.refs || [], live?.refs || []) : (live?.refs || []),
+                    audios: on
+                        ? mergeMediaByIndex(g.refAudios || [], live?.refAudios || [])
+                        : (live?.refAudios || []),
+                    videos: on
+                        ? mergeMediaByIndex(g.refVideos || [], live?.refVideos || [])
+                        : (live?.refVideos || []),
+                };
+            };
+            wirePromptImageMentions(editor, promptEl, segMedia);
+
+            // r2v: the six-section editor (last three sections) is the only primary
+            // surface. The raw chip editor is folded behind a toggle; its edits write
+            // seg.prompt directly and are never parsed back into the sections.
+            promptEl.dataset.batchR2vHidden = "1";
+            const sectionsHost = document.createElement("div");
+            sectionsHost.className = "bd-r2v-sections-host";
+            prompts.appendChild(sectionsHost);
+            const fullView = createR2vFullPromptView({
+                tokenWrap: promptEl.__bdTokenWrap || null,
+                getPreviewText: () => buildR2vFinalPrompt({
+                    commonPrompt: editor.timeline?.global?.prompt || "",
+                    segPrompt: liveSeg()?.prompt || "",
+                    commonEnabled: !!editor.isR2vCommonEnabled?.(),
+                    media: segMedia(),
+                }),
+            });
+            prompts.appendChild(fullView.root);
             const segSectionsEditor = createR2vSectionsEditor({
                 container: sectionsHost,
                 sectionNames: SEGMENT_SECTIONS,
+                editorHost: editor,
+                getMedia: segMedia,
                 onGetPrompt: () => liveSeg()?.prompt || "",
                 onSetPrompt: (text) => {
                     const live = liveSeg();
                     if (!live) return;
                     live.prompt = text;
                     promptEl.value = text;
+                    // The sections just reasserted ownership of seg.prompt.
+                    delete promptEl.dataset.batchR2vRawEdited;
                     editor.scheduleTimelineSync();
                     editor.writeExternalGroupPrompt?.(segIndex, live.prompt);
+                    fullView.refreshPreview();
                 },
             });
             sectionsHost.__r2vSectionsEditor = segSectionsEditor;
+            // Cards are rebuilt from scratch, so parsing seg.prompt here is the only
+            // way to initialize — it is not a live reverse sync.
             segSectionsEditor?.refresh();
+            promptEl.addEventListener("input", () => {
+                promptEl.dataset.batchR2vRawEdited = "1";
+                fullView.refreshPreview();
+            });
         }
 
         const preview = document.createElement("div");

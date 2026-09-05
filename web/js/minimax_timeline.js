@@ -47,6 +47,7 @@ import {
     safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import {
+    createR2vFullPromptView,
     createR2vSectionsEditor,
     COMMON_SECTIONS,
     SEGMENT_SECTIONS,
@@ -875,10 +876,10 @@ const STYLES = `
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-batch-prompts{
   flex:0 0 auto;min-height:140px;max-height:none;overflow:visible
 }
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap{
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap:not(.bd-token-compact){
   flex:0 0 auto;min-height:120px;max-height:none;height:auto;overflow:visible
 }
-.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-editor{
+.bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo .bd-token-wrap:not(.bd-token-compact)>.bd-token-editor{
   flex:0 0 auto;min-height:120px;max-height:none;height:360px;overflow:auto;resize:vertical
 }
 .bd-wrap.bd-batch-fill .bd-batch-list.bd-batch-solo>.bd-batch-card.bd-batch-plain,
@@ -1106,7 +1107,10 @@ const STYLES = `
 .bd-rv2v-layout .bd-prompt-col .bd-label,.bd-v2v-layout .bd-prompt-col .bd-label{color:#eaeaea;font-size:11px;font-weight:700;letter-spacing:.02em}
 .bd-wrap.locale-en .bd-rv2v-layout .bd-prompt-col .bd-label,.bd-wrap.locale-en .bd-v2v-layout .bd-prompt-col .bd-label{text-transform:uppercase;letter-spacing:.08em}
 .bd-prompt{width:100%;min-height:96px;background:#181818;border:1px solid #333;border-radius:6px;color:#eee;padding:8px;resize:vertical;font-size:12px;box-sizing:border-box;font-family:inherit;line-height:1.35;flex:1}
-.bd-prompt-col .bd-token-wrap{flex:1 1 auto;min-height:96px;width:100%}
+/* The global six-section host lives in this column too; its compact chip wraps
+   must not be stretched by the prompt-box sizing. */
+.bd-prompt-col .bd-token-wrap:not(.bd-token-compact){flex:1 1 auto;min-height:96px;width:100%}
+.bd-prompt-col .bd-token-wrap.bd-token-compact{width:100%}
 .bd-ref.bd-ref-flash,.bd-batch-ref.bd-ref-flash,.bd-ref-audio.bd-ref-flash,.bd-batch-audio.bd-ref-flash,.bd-batch-video.bd-ref-flash{outline:2px solid #4fff8f;outline-offset:1px;border-color:#4fff8f!important}
 .bd-rv2v-layout .bd-prompt,.bd-v2v-layout .bd-prompt{min-height:220px;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45}
 .bd-v2v-layout .bd-prompt{min-height:180px}
@@ -3414,6 +3418,9 @@ class MiniMaxH3DirectorEditor {
         this.segNegative.oninput = () => this.onNegativePrompt(this.segNegative.value);
 
         mountPromptImageMentions(this);
+        // The token shell only exists from here on, so re-run the r2v fold now:
+        // any updateModeUI() during construction found no shell and skipped it.
+        this._updateGlobalR2vSections(resolveTaskKey(this.getTaskKey()) === "r2v");
 
         this.outMode.onchange = () => this.onOutputField("mode", this.outMode.value);
         if (this.outAspect) {
@@ -5943,33 +5950,89 @@ class MiniMaxH3DirectorEditor {
     }
 
     /**
-     * r2v mode: hide the common-prompt textarea and mount a six-section editor
-     * (first three sections: subject_definitions / summary / retention_analysis).
-     * Other modes: restore the plain textarea from canonical timeline data.
+     * r2v: the six-section editor (first three sections: subject_definitions /
+     * summary / retention_analysis) is the only primary surface. The raw chip
+     * editor is folded behind a toggle and its edits never flow back.
+     * Other modes: the same shell stays open as a plain prompt box.
      */
     _updateGlobalR2vSections(isR2v) {
         const host = this.globalR2vSectionsHost;
         if (!host) return;
+        const view = this._ensureGlobalR2vFullView();
+        // Only act on real transitions — updateModeUI() runs on every mode /
+        // selection change, and re-collapsing would fight the user's own toggle.
+        const changed = this._globalR2vSectionsActive !== isR2v;
+        // Latch only once the collapsible shell exists: updateModeUI() can run
+        // before mountPromptImageMentions(), and latching early would swallow the
+        // transition and leave the raw editor permanently unfolded.
+        if (view) this._globalR2vSectionsActive = isR2v;
         if (isR2v) {
+            if (changed && view) {
+                view.root.classList.remove("is-plain");
+                view.setCollapsed(true);
+            }
             if (!this._globalR2vEditor) {
                 this._globalR2vEditor = createR2vSectionsEditor({
                     container: host,
                     sectionNames: COMMON_SECTIONS,
+                    editorHost: this,
+                    getMedia: () => ({
+                        refs: this.timeline?.global?.refs || [],
+                        audios: this.timeline?.global?.refAudios || [],
+                        videos: this.timeline?.global?.refVideos || [],
+                    }),
                     onGetPrompt: () => this.timeline.global?.prompt || "",
-                    onSetPrompt: (text) => this.onGlobalField("prompt", text),
+                    onSetPrompt: (text) => {
+                        this.onGlobalField("prompt", text);
+                        // One-way sections → raw: keep the folded editor truthful.
+                        // onGlobalField only writes timeline + widget, not the DOM.
+                        if (this.globalPrompt && this.globalPrompt.value !== text) {
+                            this.globalPrompt.value = text;
+                        }
+                    },
                 });
+                // Parse the canonical prompt once, at creation only. Refreshing on
+                // every updateModeUI() would pull raw-view edits back into the
+                // sections and clobber whatever the user is typing.
+                this._globalR2vEditor?.refresh();
             }
-            if (this.globalPrompt) this.globalPrompt.style.display = "none";
             host.classList.remove("hidden");
-            this._globalR2vEditor?.refresh();
         } else {
-            if (this.globalPrompt) {
-                this.globalPrompt.style.display = "";
-                // Restore textarea from canonical data when leaving r2v mode.
+            if (changed && view) {
+                view.root.classList.add("is-plain");
+                view.setCollapsed(false);
+            }
+            this._globalR2vEditor?.destroy();
+            this._globalR2vEditor = null;
+            host.classList.add("hidden");
+            if (changed && this.globalPrompt) {
+                // Restore the plain editor from canonical data when leaving r2v.
                 this.globalPrompt.value = this.timeline.global?.prompt || "";
             }
-            host.classList.add("hidden");
         }
+    }
+
+    /**
+     * Wrap the common-prompt token shell in the collapsible r2v view, once.
+     * The shell keeps this wrapper as its permanent home: r2v only flips
+     * collapsed / is-plain, so the editor never has to be moved back and its
+     * DOM position (and listeners) survive every mode switch.
+     */
+    _ensureGlobalR2vFullView() {
+        if (this._globalR2vFullView) return this._globalR2vFullView;
+        const wrap = this.globalPrompt?.__bdTokenWrap;
+        const parent = wrap?.parentNode;
+        if (!wrap || !parent) return null;
+        const next = wrap.nextSibling;
+        // No final-prompt preview here: the common prompt is only a prefix, the
+        // per-group cards own the "what the model receives" view.
+        const view = createR2vFullPromptView({
+            tokenWrap: wrap,
+            warnKey: "r2v.full.warnCommon",
+        });
+        parent.insertBefore(view.root, next);
+        this._globalR2vFullView = view;
+        return view;
     }
 
     getRefTarget() {

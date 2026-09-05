@@ -431,6 +431,14 @@ const ZH = {
     "r2v.sections.templateBtn": "📋 模板",
     "r2v.sections.importBtn": "🤖 导入",
 
+    // r2v folded raw-prompt view + final prompt preview
+    "r2v.full.toggle": "查看/编辑完整提示词",
+    "r2v.full.warn": "此处修改直接写入本组提示词，不会回灌六段式；六段式下次编辑会覆盖它。",
+    "r2v.full.warnCommon": "此处修改直接写入公共提示词，不会回灌六段式；六段式下次编辑会覆盖它。",
+    "r2v.final.title": "最终发送给模型的提示词",
+    "r2v.final.copy": "复制",
+    "r2v.final.copied": "已复制",
+
     "widget.seed": "种子",
     "widget.clearVram": "段间清理显存",
     "widget.exportSourceImages": "输出原片到 source_images",
@@ -924,6 +932,14 @@ const EN = {
     "r2v.import.parseError": "Cannot parse script format. Please check if it's six-section JSON or plain-text",
     "r2v.sections.templateBtn": "📋 Template",
     "r2v.sections.importBtn": "🤖 Import",
+
+    // r2v folded raw-prompt view + final prompt preview
+    "r2v.full.toggle": "View/edit full prompt",
+    "r2v.full.warn": "Edits here write straight to this group's prompt and are NOT parsed back into the six sections; the next six-section edit overwrites them.",
+    "r2v.full.warnCommon": "Edits here write straight to the common prompt and are NOT parsed back into the six sections; the next six-section edit overwrites them.",
+    "r2v.final.title": "Final prompt sent to the model",
+    "r2v.final.copy": "Copy",
+    "r2v.final.copied": "Copied",
 
     "widget.seed": "Seed",
     "widget.clearVram": "Clear VRAM between segments",

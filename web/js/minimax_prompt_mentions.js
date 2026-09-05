@@ -67,17 +67,26 @@ const MENTION_STYLES = `
   background:#4fff8f;box-shadow:0 -4px 0 rgba(79,255,143,.45)
 }
 body.bd-token-resizing{cursor:ns-resize!important;user-select:none!important}
-.bd-rv2v-layout .bd-token-editor,.bd-v2v-layout .bd-token-editor{
+/* Compact shells are the r2v six-section rows: they must not inherit the
+   growable card sizing, or every section would be forced to 220-360px. */
+.bd-token-wrap.bd-token-compact{flex:0 0 auto;min-height:0}
+.bd-token-wrap.bd-token-compact>.bd-token-editor{
+  flex:0 0 auto;height:auto;min-height:80px;
+  background:#181818;border:1px solid #333;border-radius:4px;padding:8px;
+  font-size:11px;line-height:1.4
+}
+.bd-rv2v-layout .bd-token-wrap:not(.bd-token-compact)>.bd-token-editor,
+.bd-v2v-layout .bd-token-wrap:not(.bd-token-compact)>.bd-token-editor{
   min-height:220px;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
 }
-.bd-v2v-layout .bd-token-editor{min-height:180px}
-.bd-batch-prompts .bd-token-editor{
+.bd-v2v-layout .bd-token-wrap:not(.bd-token-compact)>.bd-token-editor{min-height:180px}
+.bd-batch-prompts .bd-token-wrap:not(.bd-token-compact)>.bd-token-editor{
   min-height:88px;background:#181818;border:1px solid #333;border-radius:4px;padding:6px;font-size:11px;line-height:1.35
 }
 .bd-batch-plain .bd-batch-prompts .bd-token-editor,.bd-batch-source .bd-batch-prompts .bd-token-editor{
   min-height:120px;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
 }
-.bd-batch-r2v .bd-batch-prompts .bd-token-editor{
+.bd-batch-r2v .bd-batch-prompts .bd-token-wrap:not(.bd-token-compact)>.bd-token-editor{
   min-height:360px;height:100%;background:#101010;border-color:#2e2e2e;border-radius:8px;padding:10px;font-size:12px;line-height:1.45
 }
 
@@ -807,13 +816,14 @@ function installTokenResizeHandle(wrap, editor) {
     });
 }
 
-function ensureTokenShell(textarea) {
+function ensureTokenShell(textarea, options = {}) {
     if (textarea.dataset.tokenShell === "1" && textarea.__bdTokenEditor) {
         return textarea.__bdTokenEditor;
     }
     injectStyles();
+    const compact = !!options.compact;
     const wrap = document.createElement("div");
-    wrap.className = "bd-token-wrap";
+    wrap.className = compact ? "bd-token-wrap bd-token-compact" : "bd-token-wrap";
     const parent = textarea.parentNode;
     parent.insertBefore(wrap, textarea);
     wrap.appendChild(textarea);
@@ -835,7 +845,8 @@ function ensureTokenShell(textarea) {
     }
     wrap.appendChild(editor);
     // R2V uses the growable card/list layout; other modes keep their existing flex sizing.
-    if (textarea.closest(".bd-batch-r2v")) {
+    // Compact shells skip the grip — six rows of handles would clutter the section panel.
+    if (!compact && textarea.closest(".bd-batch-r2v")) {
         installTokenResizeHandle(wrap, editor);
     }
     textarea.__bdTokenEditor = editor;
@@ -945,12 +956,12 @@ function installGlobalClipboardHook() {
  * Wire @-mention dropdown + token chip editor on a prompt textarea.
  * Typing `@` lists uploaded reference images / audios / videos; pick one to insert official tags.
  */
-export function wirePromptImageMentions(editorHost, textarea, getMedia) {
+export function wirePromptImageMentions(editorHost, textarea, getMedia, options = {}) {
     if (!textarea || textarea.dataset.mentionWired) return;
     textarea.dataset.mentionWired = "1";
     injectStyles();
 
-    const rich = ensureTokenShell(textarea);
+    const rich = ensureTokenShell(textarea, options);
     const chipOpts = {
         onActivate: ({ kind, ordinal }) => {
             try {
