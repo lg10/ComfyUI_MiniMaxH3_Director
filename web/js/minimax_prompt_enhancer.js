@@ -3,13 +3,6 @@
 import { api } from "../../scripts/api.js";
 import { resolveTaskKey, taskUsesReferenceImages, taskUsesReferenceVideo } from "./minimax_gen_timeline.js";
 import { stripFl2vPromptBody } from "./minimax_fl2v.js";
-import { t } from "./minimax_i18n.js";
-import {
-    createR2vSectionsEditor,
-    generateR2vTemplate,
-    parseR2vSections,
-    assembleR2vSections,
-} from "./minimax_r2v_sections.js";
 
 export const PE_PANEL_COLLAPSED_H = 34;
 export const PE_PANEL_EXPANDED_H = 348;
@@ -174,74 +167,6 @@ function formatEnhanceSuccessStatus(taskKey, result) {
 
 function resolveCharacterDetailLevel(pe, opts) {
     return resolveCharacterFeatureEnhance(pe, opts) ? CHARACTER_DETAIL_DETAILED : "一般";
-}
-
-/**
- * Show r2v AI script import dialog (extracted to reduce mountPromptEnhancerPanel divergence).
- * @param {Object} pe - Prompt enhancer panel instance
- */
-function showR2vImportDialog(pe) {
-    const overlay = el({
-        position: "fixed", top: "0", left: "0", right: "0", bottom: "0",
-        background: "rgba(0,0,0,.7)", zIndex: "10000",
-        display: "flex", alignItems: "center", justifyContent: "center",
-    });
-    const dialog = el({
-        background: "#1a1a1a", border: "1px solid #333", borderRadius: "8px",
-        padding: "16px", width: "90%", maxWidth: "600px", maxHeight: "80vh",
-        display: "flex", flexDirection: "column", gap: "12px",
-    });
-    const title = el({ fontSize: "14px", fontWeight: "600", color: "#4fff8f" }, t("r2v.import.title"));
-    const hint = el({ fontSize: "11px", color: "#888", lineHeight: "1.4", whiteSpace: "pre-wrap" }, t("r2v.import.hint"));
-    const textarea = document.createElement("textarea");
-    Object.assign(textarea.style, {
-        width: "100%", minHeight: "200px", padding: "10px",
-        background: "#12151b", color: "#d6dbe6", border: "1px solid #2a3140",
-        borderRadius: "4px", fontSize: "11px", fontFamily: "monospace",
-        resize: "vertical", outline: "none",
-    });
-    textarea.placeholder = t("r2v.import.placeholder");
-    const btnRow = el({ display: "flex", gap: "8px", justifyContent: "flex-end" });
-    const cancelBtn = el({
-        padding: "6px 16px", background: "#333", color: "#ddd",
-        border: "1px solid #444", borderRadius: "4px", cursor: "pointer", fontSize: "11px",
-    }, t("r2v.import.cancel"), "button");
-    cancelBtn.onclick = () => overlay.remove();
-    const importBtn = el({
-        padding: "6px 16px", background: "#8b5cf6", color: "#fff",
-        border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontWeight: "600",
-    }, t("r2v.import.confirm"), "button");
-    importBtn.onclick = () => {
-        const input = textarea.value.trim();
-        if (!input) {
-            pe.setStatus(t("r2v.import.empty"), "error");
-            return;
-        }
-        const parsed = parseR2vSections(input);
-        if (!parsed) {
-            pe.setStatus(t("r2v.import.parseError"), "error");
-            return;
-        }
-        if (pe.sectionsEditor) {
-            pe.sectionsEditor.setSections(parsed);
-        }
-        const text = assembleR2vSections(parsed, false);
-        pe.setActivePromptText(text);
-        overlay.remove();
-        pe.setStatus(t("r2v.import.success"), "success");
-    };
-    btnRow.appendChild(cancelBtn);
-    btnRow.appendChild(importBtn);
-    dialog.appendChild(title);
-    dialog.appendChild(hint);
-    dialog.appendChild(textarea);
-    dialog.appendChild(btnRow);
-    overlay.appendChild(dialog);
-    overlay.addEventListener("click", (e) => {
-        if (e.target === overlay) overlay.remove();
-    });
-    document.body.appendChild(overlay);
-    textarea.focus();
 }
 
 export function mountPromptEnhancerPanel(editor, parentEl) {
@@ -480,24 +405,6 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.enhanceAllBtn.onclick = () => pe.enhancePrompt("all");
     enhanceRow.appendChild(pe.enhanceAllBtn);
     btnRow.appendChild(enhanceRow);
-
-    // r2v six-section tools row (only visible in r2v mode)
-    const r2vToolsRow = el({ display: "none", gap: "6px" });
-    pe.r2vToolsRow = r2vToolsRow;
-    pe.insertTemplateBtn = el({
-        flex: "1", background: "#10b981", color: "#fff", border: "none", borderRadius: "4px",
-        padding: "6px", fontWeight: "600", fontSize: "10px", cursor: "pointer",
-    }, t("r2v.btn.insertTemplate"), "button");
-    pe.insertTemplateBtn.onclick = () => pe.insertR2vTemplate();
-    r2vToolsRow.appendChild(pe.insertTemplateBtn);
-    pe.importScriptBtn = el({
-        flex: "1", background: "#8b5cf6", color: "#fff", border: "none", borderRadius: "4px",
-        padding: "6px", fontWeight: "600", fontSize: "10px", cursor: "pointer",
-    }, t("r2v.btn.importScript"), "button");
-    pe.importScriptBtn.onclick = () => pe.showImportDialog();
-    r2vToolsRow.appendChild(pe.importScriptBtn);
-    btnRow.appendChild(r2vToolsRow);
-
     const utilRow = el({ display: "flex", gap: "6px" });
     pe.unloadBtn = el({ background: "#252a34", color: "#e8ecf4", border: "1px solid #2a3140", borderRadius: "4px", padding: "6px 10px", fontSize: "10px", cursor: "pointer" }, "卸载 Ollama", "button");
     pe.unloadBtn.onclick = () => pe.unloadOllama();
@@ -526,103 +433,6 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
 
     parentEl.appendChild(header);
     parentEl.appendChild(pe.body);
-
-    // ─── r2v Six-Section Editor Integration ─────────────────────────────────
-    pe.sectionsContainer = el({ display: "none", marginTop: "8px" });
-    parentEl.appendChild(pe.sectionsContainer);
-
-    pe.sectionsEditor = null;
-
-    /** Check if current task is r2v mode. */
-    pe.isR2vMode = () => {
-        const taskKey = resolveTaskKey(editor.getTaskKey?.() || "");
-        return taskKey === "r2v";
-    };
-
-    /** Show/hide r2v tools based on current task mode. */
-    pe.updateR2vUI = () => {
-        const isR2v = pe.isR2vMode();
-        if (pe.r2vToolsRow) {
-            pe.r2vToolsRow.style.display = isR2v ? "flex" : "none";
-        }
-        if (isR2v && !pe.sectionsEditor) {
-            pe.initSectionsEditor();
-        }
-        if (pe.sectionsContainer) {
-            pe.sectionsContainer.style.display = isR2v ? "block" : "none";
-        }
-    };
-
-    /** Initialize the six-section editor. */
-    pe.initSectionsEditor = () => {
-        if (pe.sectionsEditor) return;
-        pe.sectionsEditor = createR2vSectionsEditor({
-            container: pe.sectionsContainer,
-            onGetPrompt: () => pe.getActivePromptText(),
-            onSetPrompt: (text) => pe.setActivePromptText(text),
-            onSplitToDirector: (common, segment) => pe.applySplitToDirector(common, segment),
-        });
-        // Initial sync from current prompt
-        if (pe.sectionsEditor) {
-            pe.sectionsEditor.refresh();
-        }
-    };
-
-    /** Insert r2v six-section template skeleton. */
-    pe.insertR2vTemplate = () => {
-        const isGlobal = editor.isGlobalMode?.();
-        const template = generateR2vTemplate({
-            subjectCount: 1,
-            pictureCount: 0,
-            videoCount: 0,
-            audioCount: 0,
-            shotCount: 2,
-            forCommon: isGlobal,
-            forSegment: !isGlobal,
-        });
-        const text = assembleR2vSections(template, false);
-        const currentText = pe.getActivePromptText();
-        // Append if there's existing content, otherwise replace
-        const newText = currentText.trim() ? `${currentText.trim()}\n\n${text}` : text;
-        pe.setActivePromptText(newText);
-        // Refresh sections editor if visible
-        if (pe.sectionsEditor) {
-            pe.sectionsEditor.refresh();
-        }
-        pe.setStatus(t("r2v.template.inserted").replace("{mode}", isGlobal ? t("r2v.template.common") : t("r2v.template.segment")), "success");
-    };
-
-    /** Show AI script import dialog. */
-    pe.showImportDialog = () => showR2vImportDialog(pe);
-
-    /** Set common (global) prompt on editor. Encapsulates editor internals. */
-    pe.setEditorCommonPrompt = (text) => {
-        if (editor.globalPrompt) editor.globalPrompt.value = text;
-        if (editor.timeline.global) editor.timeline.global.prompt = text;
-        if (editor.globalPromptWidget) editor.globalPromptWidget.value = text;
-    };
-
-    /** Set segment prompt on editor. Encapsulates editor internals. */
-    pe.setEditorSegmentPrompt = (text, idx) => {
-        const seg = editor.timeline.segments?.[idx];
-        if (seg) seg.prompt = text;
-        if (idx === editor.selectedIndex && editor.segPrompt) {
-            editor.segPrompt.value = text;
-        }
-    };
-
-    /** Apply split sections to Director common + segment prompts. */
-    pe.applySplitToDirector = (common, segment) => {
-        const commonText = assembleR2vSections(common, false);
-        pe.setEditorCommonPrompt(commonText);
-
-        const segmentText = assembleR2vSections(segment, false);
-        const idx = editor.selectedIndex ?? 0;
-        pe.setEditorSegmentPrompt(segmentText, idx);
-
-        editor.commit?.(false, { syncTimeline: true });
-        pe.setStatus(t("r2v.split.success"), "success");
-    };
 
     pe.widget = (name) => editor.widget(name);
 
@@ -1065,10 +875,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     };
     pe.unloadOllama = pe.unloadModel;
 
-    pe.onTaskTypeChanged = () => {
-        pe.fetchTemplate();
-        pe.updateR2vUI();
-    };
+    pe.onTaskTypeChanged = () => pe.fetchTemplate();
     pe.handleServerEnhanced = (payload) => {
         if (!payload || String(payload.node) !== String(editor.node.id)) return;
         let text = payload.text || "";
@@ -1083,7 +890,6 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.syncFromWidgets();
     editor._promptEnhancer = pe;
     pe.fetchTemplate(true);
-    pe.updateR2vUI();
     return pe;
 }
 

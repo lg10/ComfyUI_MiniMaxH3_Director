@@ -428,11 +428,6 @@ const ZH = {
     "r2v.import.confirm": "导入并填充",
     "r2v.import.empty": "请输入剧本内容",
     "r2v.import.parseError": "无法解析剧本格式，请检查是否为六段式 JSON 或纯文本",
-    "r2v.import.success": "AI 剧本导入成功",
-    "r2v.template.inserted": "已插入六段式模板（{mode}）",
-    "r2v.template.common": "公共",
-    "r2v.template.segment": "分组",
-    "r2v.split.success": "已拆分：前三段→公共提示词，后三段→分组提示词",
     "r2v.sections.templateBtn": "📋 模板",
     "r2v.sections.importBtn": "🤖 导入",
 
@@ -927,11 +922,6 @@ const EN = {
     "r2v.import.confirm": "Import & Fill",
     "r2v.import.empty": "Please enter script content",
     "r2v.import.parseError": "Cannot parse script format. Please check if it's six-section JSON or plain-text",
-    "r2v.import.success": "AI script imported successfully",
-    "r2v.template.inserted": "Six-section template inserted ({mode})",
-    "r2v.template.common": "common",
-    "r2v.template.segment": "segment",
-    "r2v.split.success": "Split: first 3 sections → common prompt, last 3 → segment prompt",
     "r2v.sections.templateBtn": "📋 Template",
     "r2v.sections.importBtn": "🤖 Import",
 
