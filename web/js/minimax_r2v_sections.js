@@ -183,20 +183,44 @@ export function parseR2vSections(input) {
 
     // Plain-text six-section format (§8.2)
     // Pattern: section_name: content (or section_name:\ncontent)
+    // Strategy: find all section headers, extract content between them.
     const result = {};
     let hasAny = false;
-
-    for (const name of SECTION_NAMES) {
-        // Match "section_name:" at start of line, capture until next section or end
-        const regex = new RegExp(
-            `^${name}:\\s*([\\s\\S]*?)(?=^(?:${SECTION_NAMES.join("|")}):|\\Z)`,
-            "gim"
-        );
-        const match = regex.exec(text);
-        if (match) {
-            result[name] = match[1].trim();
+    
+    // Build a regex to find all section headers
+    const headerPattern = new RegExp(
+        `^(${SECTION_NAMES.join("|")}):\\s*$`,
+        "gim"
+    );
+    
+    // Find all header positions
+    const headers = [];
+    let match;
+    while ((match = headerPattern.exec(text)) !== null) {
+        headers.push({
+            name: match[1].toLowerCase(),
+            start: match.index,
+            contentStart: match.index + match[0].length,
+        });
+    }
+    
+    // Extract content between headers
+    for (let i = 0; i < headers.length; i++) {
+        const header = headers[i];
+        const nextHeader = headers[i + 1];
+        const contentEnd = nextHeader ? nextHeader.start : text.length;
+        const content = text.slice(header.contentStart, contentEnd).trim();
+        // Normalize section name to match SECTION_NAMES casing
+        const normalizedName = SECTION_NAMES.find(n => n.toLowerCase() === header.name);
+        if (normalizedName) {
+            result[normalizedName] = content;
             hasAny = true;
-        } else {
+        }
+    }
+    
+    // Fill missing sections with empty string
+    for (const name of SECTION_NAMES) {
+        if (!(name in result)) {
             result[name] = "";
         }
     }

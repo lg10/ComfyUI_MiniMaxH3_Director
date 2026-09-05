@@ -3,13 +3,12 @@
 import { api } from "../../scripts/api.js";
 import { resolveTaskKey, taskUsesReferenceImages, taskUsesReferenceVideo } from "./minimax_gen_timeline.js";
 import { stripFl2vPromptBody } from "./minimax_fl2v.js";
+import { t } from "./minimax_i18n.js";
 import {
     createR2vSectionsEditor,
     generateR2vTemplate,
     parseR2vSections,
     assembleR2vSections,
-    splitSectionsForDirector,
-    SECTION_NAMES,
 } from "./minimax_r2v_sections.js";
 
 export const PE_PANEL_COLLAPSED_H = 34;
@@ -420,13 +419,13 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
     pe.insertTemplateBtn = el({
         flex: "1", background: "#10b981", color: "#fff", border: "none", borderRadius: "4px",
         padding: "6px", fontWeight: "600", fontSize: "10px", cursor: "pointer",
-    }, "📋 插入六段式模板", "button");
+    }, t("r2v.btn.insertTemplate"), "button");
     pe.insertTemplateBtn.onclick = () => pe.insertR2vTemplate();
     r2vToolsRow.appendChild(pe.insertTemplateBtn);
     pe.importScriptBtn = el({
         flex: "1", background: "#8b5cf6", color: "#fff", border: "none", borderRadius: "4px",
         padding: "6px", fontWeight: "600", fontSize: "10px", cursor: "pointer",
-    }, "🤖 导入 AI 剧本", "button");
+    }, t("r2v.btn.importScript"), "button");
     pe.importScriptBtn.onclick = () => pe.showImportDialog();
     r2vToolsRow.appendChild(pe.importScriptBtn);
     btnRow.appendChild(r2vToolsRow);
@@ -522,7 +521,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
         if (pe.sectionsEditor) {
             pe.sectionsEditor.refresh();
         }
-        pe.setStatus(`已插入六段式模板（${isGlobal ? "公共" : "分组"}）`, "success");
+        pe.setStatus(t("r2v.template.inserted").replace("{mode}", isGlobal ? t("r2v.template.common") : t("r2v.template.segment")), "success");
     };
 
     /** Show AI script import dialog. */
@@ -538,12 +537,8 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             padding: "16px", width: "90%", maxWidth: "600px", maxHeight: "80vh",
             display: "flex", flexDirection: "column", gap: "12px",
         });
-        const title = el({ fontSize: "14px", fontWeight: "600", color: "#4fff8f" }, "🤖 导入 AI 剧本");
-        const hint = el({ fontSize: "11px", color: "#888", lineHeight: "1.4" },
-            "粘贴 AI 生成的 r2v 六段式剧本（JSON 或纯文本格式）。\n" +
-            "支持格式：\n" +
-            "1. JSON: {\"subject_definitions\": \"...\", \"summary\": \"...\", ...}\n" +
-            "2. 纯文本: subject_definitions:\n内容...\n\nsummary:\n内容...");
+        const title = el({ fontSize: "14px", fontWeight: "600", color: "#4fff8f" }, t("r2v.import.title"));
+        const hint = el({ fontSize: "11px", color: "#888", lineHeight: "1.4", whiteSpace: "pre-wrap" }, t("r2v.import.hint"));
         const textarea = document.createElement("textarea");
         Object.assign(textarea.style, {
             width: "100%", minHeight: "200px", padding: "10px",
@@ -551,26 +546,26 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             borderRadius: "4px", fontSize: "11px", fontFamily: "monospace",
             resize: "vertical", outline: "none",
         });
-        textarea.placeholder = "在此粘贴 AI 生成的剧本...";
+        textarea.placeholder = t("r2v.import.placeholder");
         const btnRow = el({ display: "flex", gap: "8px", justifyContent: "flex-end" });
         const cancelBtn = el({
             padding: "6px 16px", background: "#333", color: "#ddd",
             border: "1px solid #444", borderRadius: "4px", cursor: "pointer", fontSize: "11px",
-        }, "取消", "button");
+        }, t("r2v.import.cancel"), "button");
         cancelBtn.onclick = () => overlay.remove();
         const importBtn = el({
             padding: "6px 16px", background: "#8b5cf6", color: "#fff",
             border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontWeight: "600",
-        }, "导入并填充", "button");
+        }, t("r2v.import.confirm"), "button");
         importBtn.onclick = () => {
             const input = textarea.value.trim();
             if (!input) {
-                pe.setStatus("请输入剧本内容", "error");
+                pe.setStatus(t("r2v.import.empty"), "error");
                 return;
             }
             const parsed = parseR2vSections(input);
             if (!parsed) {
-                pe.setStatus("无法解析剧本格式，请检查是否为六段式 JSON 或纯文本", "error");
+                pe.setStatus(t("r2v.import.parseError"), "error");
                 return;
             }
             // Apply to sections editor
@@ -581,7 +576,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             const text = assembleR2vSections(parsed, false);
             pe.setActivePromptText(text);
             overlay.remove();
-            pe.setStatus("AI 剧本导入成功", "success");
+            pe.setStatus(t("r2v.import.success"), "success");
         };
         btnRow.appendChild(cancelBtn);
         btnRow.appendChild(importBtn);
@@ -621,7 +616,7 @@ export function mountPromptEnhancerPanel(editor, parentEl) {
             editor.segPrompt.value = segmentText;
         }
         editor.commit?.(false, { syncTimeline: true });
-        pe.setStatus("已拆分：前三段→公共提示词，后三段→分组提示词", "success");
+        pe.setStatus(t("r2v.split.success"), "success");
     };
 
     pe.widget = (name) => editor.widget(name);
