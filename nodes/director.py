@@ -186,9 +186,9 @@ class MiniMaxH3Director:
 
         return first_pass_cache_disk_signature(unique_id)
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE")
-    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine")
-    OUTPUT_IS_LIST = (True, True, False, False, True, False, True)
+    RETURN_TYPES = ("IMAGE", "AUDIO", "FLOAT", "INT", "IMAGE", "STRING", "IMAGE", "VIDEO", "STRING")
+    RETURN_NAMES = ("images", "audio", "fps", "frame_count", "source_images", "report", "images_pre_refine", "segment_videos", "segment_paths")
+    OUTPUT_IS_LIST = (True, True, False, False, True, False, True, True, False)
     FUNCTION = "execute"
     CATEGORY = _CATEGORY
     DESCRIPTION = (
@@ -249,7 +249,7 @@ class MiniMaxH3Director:
         )
 
         try:
-            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation, merged_path = (
+            combined, segment_outputs, segment_audios, report, export_frame_counts, pre_combined, pre_segments, held_for_confirmation, merged_path, mp4_run_dir = (
                 execute_director_plan_core(
                     plan,
                     node_id=unique_id,
@@ -281,6 +281,7 @@ class MiniMaxH3Director:
                 pre_refine_segments=pre_segments,
                 block_final_images=held_for_confirmation,
                 merged_video_path=merged_path,
+                segment_mp4_run_dir=mp4_run_dir,
             )
         finally:
             # Full source/reference PCM is execution-scoped.

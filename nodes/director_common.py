@@ -22,6 +22,11 @@ from ..lib.image_prep import fit_canvas, fit_video_long_edge
 from ..lib.video_io import load_timeline_segment
 from ..lib.task_prompts import task_type_combo_options
 
+try:
+    from comfy_api.latest import InputImpl as _comfy_input_impl
+except ImportError:  # pragma: no cover — only available inside ComfyUI (V0.3+)
+    _comfy_input_impl = None
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director")
 
 
@@ -64,6 +69,60 @@ def _merged_video_ui_entry(plan, merged_video_path: str | None) -> dict | None:
     except Exception as exc:
         log.warning("merged.mp4 ASSETS-panel report skipped: %s", exc)
         return None
+
+
+def _segment_video_path_list(plan, segment_mp4_run_dir, merged_video_path: str | None) -> list[str]:
+    """Ordered absolute paths of分段导出's per-segment final clips + merged.mp4.
+
+    Final clips only (``seg_XXXX.mp4`` — no ``_pre`` / ``_pN`` / alias copies), in
+    segment index order; ``merged.mp4`` appended last when this run produced it.
+    Paths absent from disk are skipped, which naturally covers every mode: merge-only
+    writes only merged.mp4; partial/select runs export only the re-generated segments;
+    a single unmerged segment still lists its own clip; "all" mode has no run dir →
+    empty list. Best-effort: never raises.
+    """
+    paths: list[str] = []
+    try:
+        from pathlib import Path
+
+        if segment_mp4_run_dir is not None:
+            from ..director.segment_mp4_export import segment_mp4_path
+
+            run_dir = Path(segment_mp4_run_dir)
+            segs = sorted(
+                getattr(plan, "segments", None) or [],
+                key=lambda s: int(getattr(s, "index", 0) or 0),
+            )
+            for seg in segs:
+                final = segment_mp4_path(run_dir, seg)  # seg_XXXX.mp4 (no suffix)
+                if final.is_file():
+                    paths.append(str(final))
+        if merged_video_path:
+            merged = str(merged_video_path)
+            if merged not in paths and Path(merged).is_file():
+                paths.append(merged)
+    except Exception as exc:  # pragma: no cover — best-effort, never abort a run
+        log.warning("segment video path list build failed: %s", exc)
+    return paths
+
+
+def _video_list_outputs(paths: list[str]):
+    """Build the (VIDEO-list, STRING-json) outputs for a segment path list.
+
+    VIDEO output mirrors PixNodes' CreateVideoList: ``comfy_api.latest``
+    ``VideoFromFile`` objects on new ComfyUI, else the raw path strings as a graceful
+    fallback (still connectable to a VIDEO socket). STRING output is a JSON array of
+    absolute paths — feeds PixNodes' GetVideoFromPathList (``video_paths_json``) or any
+    string/text consumer. Both are valid (empty) when ``paths`` is empty.
+    """
+    video_list_out: list = list(paths)
+    if _comfy_input_impl is not None and paths:
+        try:
+            video_list_out = [_comfy_input_impl.VideoFromFile(p) for p in paths]
+        except Exception as exc:  # pragma: no cover — fall back to path strings
+            log.warning("VIDEO object build failed, using path strings: %s", exc)
+            video_list_out = list(paths)
+    return video_list_out, json.dumps(paths, ensure_ascii=False)
 
 
 def timeline_required_inputs() -> dict:
@@ -387,6 +446,7 @@ def finalize_director_outputs(
     pre_refine_segments: list | None = None,
     block_final_images: bool = False,
     merged_video_path: str | None = None,
+    segment_mp4_run_dir=None,
 ):
     is_batch = is_prompt_batch_timeline(plan.raw, plan.global_task_key)
     export_segments = plan.export_mode == "segments"
@@ -521,6 +581,19 @@ def finalize_director_outputs(
             "请从 images_pre_refine 查看或保存一采；再次 Queue 完成二采后 images 才会输出。"
         )
         images_out = ExecutionBlocker(None)
+
+    # 「视频路径列表」outputs: per-segment final clips (in index order) + merged.mp4.
+    # segment_videos → VIDEO socket (PixNodes GetVideoFromVideoList); segment_paths →
+    # STRING JSON array (PixNodes GetVideoFromPathList / any text consumer). Empty in
+    # "all" export mode (no per-segment mp4s are written there).
+    segment_video_paths = _segment_video_path_list(plan, segment_mp4_run_dir, merged_video_path)
+    segment_videos_out, segment_paths_json = _video_list_outputs(segment_video_paths)
+    if segment_video_paths:
+        report = report + (
+            f"\n\nsegment_videos / segment_paths：{len(segment_video_paths)} 个视频路径"
+            "（各段最终成片 seg_XXXX.mp4 按段序 + merged.mp4）——"
+            "VIDEO 口接 PixNodes GetVideoFromVideoList，STRING 口接 GetVideoFromPathList。"
+        )
     result = (
         images_out,
         audio_out,
@@ -529,6 +602,8 @@ def finalize_director_outputs(
         source_images_out,
         report,
         pre_refine_out,
+        segment_videos_out,
+        segment_paths_json,
     )
     # Surface分段导出's merged.mp4 to ComfyUI's ASSETS panel (history-driven).
     ui_video = _merged_video_ui_entry(plan, merged_video_path)

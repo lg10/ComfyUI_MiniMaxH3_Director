@@ -589,6 +589,78 @@ def _auto_merge_segments_to_mp4(
         return None
 
 
+def _merge_only_from_cache(
+    *,
+    plan: DirectorPlan,
+    node_id: str | None,
+    mp4_run_dir,
+    seg_by_index: dict[int, SegmentPlan],
+    all_segments: list,
+    reports: list[str],
+):
+    """「仅合并缓存」: skip sampling; stream merged.mp4 straight from the disk cache.
+
+    Rebuilds the true per-segment export lengths + audio table from cached
+    decoded frames (no model / no VAE), then reuses _auto_merge_segments_to_mp4
+    so merged.mp4 is bit-identical to分段导出's auto-merge. IMAGE output is a
+    1-frame poster captured from the first cached segment (zero extra peak RAM).
+    Best-effort: missing-cache segments are skipped + reported; <2 cached → no
+    merge (reported), never a crash.
+    """
+    reports.append("")
+    reports.append("Merge-only「仅合并缓存」: 跳过采样/生成，仅从磁盘缓存流式拼接 merged.mp4。")
+    segment_export_lengths: dict[int, int] = {}
+    completed_audios: dict[int, dict] = {}
+    missing: list[int] = []
+    poster: torch.Tensor | None = None
+    for seg in all_segments:
+        t = load_segment_cache(node_id, seg, plan)
+        if t is None:
+            t = load_segment_cache(node_id, seg, plan, allow_stale=True)
+        if t is None:
+            missing.append(int(seg.index) + 1)
+            continue
+        segment_export_lengths[int(seg.index)] = int(t.shape[0])
+        if poster is None:
+            poster = _poster_frame(t)  # 1-frame CPU clone; full segment freed below
+        a = load_segment_audio(node_id, seg, plan, allow_stale=True)
+        if a:
+            completed_audios[int(seg.index)] = a
+        del t
+    cached_n = len(segment_export_lengths)
+    reports.append(
+        f"缓存命中：{cached_n}/{len(all_segments)} 段"
+        + (f"；缺失段 #{missing}（未生成或缓存已删，已跳过）" if missing else "")
+    )
+    merged_path: str | None = None
+    if cached_n >= 2:
+        merged_path = _auto_merge_segments_to_mp4(
+            plan=plan, node_id=node_id, mp4_run_dir=mp4_run_dir,
+            seg_by_index=seg_by_index, segment_export_lengths=segment_export_lengths,
+            completed_audios=completed_audios, reports=reports,
+        )
+        if merged_path:
+            reports.append(
+                f"仅合并缓存完成：{merged_path}"
+                "（逐段从磁盘缓存流式拼接，画质同「分段导出」自动拼接，内存峰值≈1-2 段）。"
+            )
+    elif cached_n == 1:
+        only = sorted(segment_export_lengths)[0]
+        reports.append(
+            f"仅合并缓存：只有 1 段（#{only + 1}）有缓存，无需拼接——"
+            "该段 seg mp4 即整片；如需合并请先生成更多段。"
+        )
+    else:
+        reports.append("仅合并缓存：没有任何段缓存可合并。请先运行生成（或确认缓存未被清理）。")
+    if poster is None:
+        poster = torch.full((1, 1, 1, 3), 0.5)
+    lengths_list = [segment_export_lengths[i] for i in sorted(segment_export_lengths)]
+    return (
+        poster, [poster], [], "\n".join(reports), lengths_list,
+        poster, [poster], False, merged_path, mp4_run_dir,
+    )
+
+
 def _release_merge_pixels(
     index: int,
     *,
@@ -866,6 +938,15 @@ def execute_director_plan_core(
             "内存优化：「全部导出」流式合并已启用（合并方式=流式导出）——"
             "每段落盘验证后即释放 RAM 像素、拼接时逐段流式重载，"
             "峰值≈1×整片而非随提示词组数线性增长（重载失败自动回退到整片常驻）。"
+        )
+
+    # 「仅合并缓存」: skip the entire sample/decode/merge pipeline; stream a
+    # merged.mp4 straight from the disk cache (no model, no VAE). plan.run_indices
+    # is forced None and export_mode forced "segments" upstream (see plan.py).
+    if getattr(plan, "merge_only", False):
+        return _merge_only_from_cache(
+            plan=plan, node_id=node_id, mp4_run_dir=mp4_run_dir,
+            seg_by_index=seg_by_index, all_segments=all_segments, reports=reports,
         )
 
     def _run_one_segment(
@@ -2088,4 +2169,5 @@ def execute_director_plan_core(
         segment_pre_refine,
         held_for_confirmation,
         merged_path,
+        mp4_run_dir,
     )
