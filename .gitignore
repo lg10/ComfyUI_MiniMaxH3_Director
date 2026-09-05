@@ -22,6 +22,9 @@ Thumbs.db
 .cursorignore
 *.cursor*
 
+# Git worktrees (isolated feature workspaces)
+.worktrees/
+
 # Runtime / local caches (ComfyUI output/minimax_seg_cache is outside this repo)
 .minimax_seg_cache/
 .bernini_seg_cache/
