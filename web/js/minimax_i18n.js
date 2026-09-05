@@ -433,6 +433,8 @@ const ZH = {
     "r2v.template.common": "公共",
     "r2v.template.segment": "分组",
     "r2v.split.success": "已拆分：前三段→公共提示词，后三段→分组提示词",
+    "r2v.sections.templateBtn": "📋 模板",
+    "r2v.sections.importBtn": "🤖 导入",
 
     "widget.seed": "种子",
     "widget.clearVram": "段间清理显存",
@@ -930,6 +932,8 @@ const EN = {
     "r2v.template.common": "common",
     "r2v.template.segment": "segment",
     "r2v.split.success": "Split: first 3 sections → common prompt, last 3 → segment prompt",
+    "r2v.sections.templateBtn": "📋 Template",
+    "r2v.sections.importBtn": "🤖 Import",
 
     "widget.seed": "Seed",
     "widget.clearVram": "Clear VRAM between segments",

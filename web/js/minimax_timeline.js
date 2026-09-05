@@ -47,6 +47,14 @@ import {
     safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import {
+    createR2vSectionsEditor,
+    COMMON_SECTIONS,
+    SEGMENT_SECTIONS,
+    parseR2vSections,
+    assembleR2vSections,
+    generateR2vTemplate,
+} from "./minimax_r2v_sections.js";
+import {
     IMAGE_BATCH_STYLES,
     addImageBatchGroup,
     bindImageBatchEvents,
@@ -2955,6 +2963,7 @@ class MiniMaxH3DirectorEditor {
                             <span class="bd-label" data-i18n="panel.prompt">提示词</span>
                             <textarea class="bd-prompt" data-r="global-prompt" data-i18n-placeholder="placeholder.globalPrompt" placeholder=""></textarea>
                             <textarea class="bd-prompt bd-prompt-negative hidden" data-r="global-negative" hidden aria-hidden="true"></textarea>
+                            <div class="bd-r2v-sections-host hidden" data-r="global-r2v-sections"></div>
                         </div>
                     </div>
                     <div class="bd-gen-fc-row hidden" data-r="gen-global-fc-row">
@@ -3105,6 +3114,7 @@ class MiniMaxH3DirectorEditor {
         this.segmentPanel = this.root.querySelector('[data-r="segment-panel"]');
         this.globalPrompt = this.root.querySelector('[data-r="global-prompt"]');
         this.globalNegative = this.root.querySelector('[data-r="global-negative"]');
+        this.globalR2vSectionsHost = this.root.querySelector('[data-r="global-r2v-sections"]');
         this.globalPromptLayout = this.root.querySelector('[data-r="global-prompt-layout"]');
         this.segPromptLayout = this.root.querySelector('[data-r="seg-prompt-layout"]');
         this.globalRefsBox = this.root.querySelector('[data-r="global-refs"]');
@@ -5912,24 +5922,11 @@ class MiniMaxH3DirectorEditor {
         const r2vCommon = this.usesR2vCommonPanel();
         const r2vOn = this.isR2vCommonEnabled();
         const isR2v = resolveTaskKey(this.getTaskKey()) === "r2v";
-
         this.globalPanel.style.display = (global || r2vCommon) ? "flex" : "none";
         this.segmentPanel.style.display = (global || r2vCommon) ? "none" : "flex";
-
-        // Option C: In r2v mode, hide original prompt textareas and show six-section editor.
-        // In other modes, show original textareas.
-        if (this.globalPromptLayout) {
-            this.globalPromptLayout.style.display = isR2v ? "none" : "";
-        }
-        if (this.segPromptLayout) {
-            this.segPromptLayout.style.display = isR2v ? "none" : "";
-        }
-
-        // Trigger r2v UI update in prompt enhancer panel (shows/hides six-section editor).
-        if (this._promptEnhancer?.updateR2vUI) {
-            this._promptEnhancer.updateR2vUI();
-        }
-
+        // r2v mode: swap the common-prompt textarea for the six-section editor
+        // (first three sections). Other modes keep the plain textarea.
+        this._updateGlobalR2vSections(isR2v);
         this.syncR2vCommonCollapse();
         this.updateReferenceImageVisibility({
             // Show shared ref chrome only when r2v common is enabled (expanded).
@@ -5942,6 +5939,36 @@ class MiniMaxH3DirectorEditor {
             if (taskUsesReferenceVideo(this.getTaskKey())) this.renderRefVideoSlot();
         }
         this.updateLiveSamplePanel();
+    }
+
+    /**
+     * r2v mode: hide the common-prompt textarea and mount a six-section editor
+     * (first three sections: subject_definitions / summary / retention_analysis).
+     * Other modes: restore the plain textarea from canonical timeline data.
+     */
+    _updateGlobalR2vSections(isR2v) {
+        const host = this.globalR2vSectionsHost;
+        if (!host) return;
+        if (isR2v) {
+            if (!this._globalR2vEditor) {
+                this._globalR2vEditor = createR2vSectionsEditor({
+                    container: host,
+                    sectionNames: COMMON_SECTIONS,
+                    onGetPrompt: () => this.timeline.global?.prompt || "",
+                    onSetPrompt: (text) => this.onGlobalField("prompt", text),
+                });
+            }
+            if (this.globalPrompt) this.globalPrompt.style.display = "none";
+            host.classList.remove("hidden");
+            this._globalR2vEditor?.refresh();
+        } else {
+            if (this.globalPrompt) {
+                this.globalPrompt.style.display = "";
+                // Restore textarea from canonical data when leaving r2v mode.
+                this.globalPrompt.value = this.timeline.global?.prompt || "";
+            }
+            host.classList.add("hidden");
+        }
     }
 
     getRefTarget() {

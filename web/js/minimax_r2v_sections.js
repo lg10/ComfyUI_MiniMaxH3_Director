@@ -24,6 +24,12 @@ export const SECTION_NAMES = [
     "non_diegetic_music",
 ];
 
+/** First three sections → Director common/global prompt (shared across groups). */
+export const COMMON_SECTIONS = SECTION_NAMES.slice(0, 3);
+
+/** Last three sections → Director segment/group prompt (per-shot). */
+export const SEGMENT_SECTIONS = SECTION_NAMES.slice(3);
+
 /** Human-readable labels for each section (i18n keys). */
 const SECTION_LABELS = {
     subject_definitions: "r2v.section.subject_definitions",
@@ -62,9 +68,10 @@ function countWords(str) {
     return content ? content.split(/\s+/).filter(Boolean).length : 0;
 }
 
-/** Read all textarea values into sections object (mutates sections). */
+/** Read all textarea values into sections object (mutates sections).
+ *  Iterates only over mounted editors so subset mode (common/segment) works. */
 function readTextareasIntoSections(sectionEditors, sections) {
-    for (const name of SECTION_NAMES) {
+    for (const name of Object.keys(sectionEditors)) {
         const editor = sectionEditors[name];
         if (editor) {
             sections[name] = editor.textarea.value;
@@ -88,7 +95,7 @@ const SECTION_STYLES = `
   font-size:12px;font-weight:600;color:#4fff8f;
   display:flex;align-items:center;gap:6px
 }
-.r2v-sections-actions{display:flex;gap:4px}
+.r2v-sections-actions{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
 .r2v-section-btn{
   padding:3px 8px;font-size:10px;border-radius:4px;cursor:pointer;
   border:1px solid #444;background:#252525;color:#ddd;
@@ -300,19 +307,13 @@ export function assembleR2vSections(sections, useJson = false) {
 export function splitSectionsForDirector(sections) {
     if (!sections) return { common: {}, segment: {} };
 
-    const common = {
-        subject_definitions: sections.subject_definitions || "",
-        summary: sections.summary || "",
-        retention_analysis: sections.retention_analysis || "",
+    const pick = (names) => {
+        const out = {};
+        for (const n of names) out[n] = sections[n] || "";
+        return out;
     };
 
-    const segment = {
-        detailed_description: sections.detailed_description || "",
-        overall_soundscape: sections.overall_soundscape || "",
-        non_diegetic_music: sections.non_diegetic_music || "",
-    };
-
-    return { common, segment };
+    return { common: pick(COMMON_SECTIONS), segment: pick(SEGMENT_SECTIONS) };
 }
 
 // ─── Validation ──────────────────────────────────────────────────────────────
@@ -367,6 +368,85 @@ export function validateR2vSections(sections) {
 // ─── UI Component ────────────────────────────────────────────────────────────
 
 /**
+ * Show a modal dialog to import an AI-generated r2v script.
+ * Standalone (no panel dependency): parses the pasted text and hands the
+ * resulting six-section object to onImport. Errors are shown inline.
+ * @param {(sections: Object) => void} onImport
+ */
+function showR2vImportDialog(onImport) {
+    const overlay = document.createElement("div");
+    Object.assign(overlay.style, {
+        position: "fixed", top: "0", left: "0", right: "0", bottom: "0",
+        background: "rgba(0,0,0,.7)", zIndex: "10000",
+        display: "flex", alignItems: "center", justifyContent: "center",
+    });
+    const dialog = document.createElement("div");
+    Object.assign(dialog.style, {
+        background: "#1a1a1a", border: "1px solid #333", borderRadius: "8px",
+        padding: "16px", width: "90%", maxWidth: "600px", maxHeight: "80vh",
+        display: "flex", flexDirection: "column", gap: "12px",
+    });
+    const title = document.createElement("div");
+    Object.assign(title.style, { fontSize: "14px", fontWeight: "600", color: "#4fff8f" });
+    title.textContent = t("r2v.import.title") || "🤖 导入 AI 剧本";
+    const hint = document.createElement("div");
+    Object.assign(hint.style, { fontSize: "11px", color: "#888", lineHeight: "1.4", whiteSpace: "pre-wrap" });
+    hint.textContent = t("r2v.import.hint") || "";
+    const textarea = document.createElement("textarea");
+    Object.assign(textarea.style, {
+        width: "100%", minHeight: "200px", padding: "10px", boxSizing: "border-box",
+        background: "#12151b", color: "#d6dbe6", border: "1px solid #2a3140",
+        borderRadius: "4px", fontSize: "11px", fontFamily: "monospace",
+        resize: "vertical", outline: "none",
+    });
+    textarea.placeholder = t("r2v.import.placeholder") || "";
+    const errorEl = document.createElement("div");
+    Object.assign(errorEl.style, { fontSize: "11px", color: "#ff6b6b", minHeight: "14px" });
+    const btnRow = document.createElement("div");
+    Object.assign(btnRow.style, { display: "flex", gap: "8px", justifyContent: "flex-end" });
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    Object.assign(cancelBtn.style, {
+        padding: "6px 16px", background: "#333", color: "#ddd",
+        border: "1px solid #444", borderRadius: "4px", cursor: "pointer", fontSize: "11px",
+    });
+    cancelBtn.textContent = t("r2v.import.cancel") || "取消";
+    cancelBtn.onclick = () => overlay.remove();
+    const importBtn = document.createElement("button");
+    importBtn.type = "button";
+    Object.assign(importBtn.style, {
+        padding: "6px 16px", background: "#8b5cf6", color: "#fff",
+        border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "11px", fontWeight: "600",
+    });
+    importBtn.textContent = t("r2v.import.confirm") || "导入并填充";
+    importBtn.onclick = () => {
+        const input = textarea.value.trim();
+        if (!input) {
+            errorEl.textContent = t("r2v.import.empty") || "请输入剧本内容";
+            return;
+        }
+        const parsed = parseR2vSections(input);
+        if (!parsed) {
+            errorEl.textContent = t("r2v.import.parseError") || "无法解析剧本格式";
+            return;
+        }
+        if (typeof onImport === "function") onImport(parsed);
+        overlay.remove();
+    };
+    btnRow.appendChild(cancelBtn);
+    btnRow.appendChild(importBtn);
+    dialog.appendChild(title);
+    dialog.appendChild(hint);
+    dialog.appendChild(textarea);
+    dialog.appendChild(errorEl);
+    dialog.appendChild(btnRow);
+    overlay.appendChild(dialog);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+    textarea.focus();
+}
+
+/**
  * Create the six-section editor UI.
  *
  * @param {Object} options
@@ -377,10 +457,15 @@ export function validateR2vSections(sections) {
  * @returns {Object} - Editor API { refresh, getSections, setSections, destroy }
  */
 export function createR2vSectionsEditor(options) {
-    const { container, onGetPrompt, onSetPrompt, onSplitToDirector } = options;
+    const { container, onGetPrompt, onSetPrompt, onSplitToDirector, sectionNames } = options;
     if (!container) return null;
 
     injectStyles();
+
+    // Active sections: a subset (common = first 3, segment = last 3) or all six.
+    const activeNames = (Array.isArray(sectionNames) && sectionNames.length)
+        ? sectionNames
+        : SECTION_NAMES;
 
     // State
     let sections = {};
@@ -416,6 +501,14 @@ export function createR2vSectionsEditor(options) {
             <span>${t("r2v.sections.title") || "r2v 六段式结构"}</span>
         </div>
         <div class="r2v-sections-actions">
+            <button type="button" class="r2v-section-btn" data-action="insert-template"
+                    title="${t("r2v.btn.insertTemplate") || "插入六段式模板"}">
+                ${t("r2v.sections.templateBtn") || "📋 模板"}
+            </button>
+            <button type="button" class="r2v-section-btn" data-action="import-script"
+                    title="${t("r2v.btn.importScript") || "导入 AI 剧本"}">
+                ${t("r2v.sections.importBtn") || "🤖 导入"}
+            </button>
             <button type="button" class="r2v-section-btn" data-action="sync-from-prompt"
                     title="${t("r2v.sections.syncFromPrompt") || "从提示词同步"}">
                 ↓ ${t("r2v.sections.syncFrom") || "从提示词"}
@@ -435,7 +528,7 @@ export function createR2vSectionsEditor(options) {
 
     // Section editors
     const sectionEditors = {};
-    for (const name of SECTION_NAMES) {
+    for (const name of activeNames) {
         const item = document.createElement("div");
         item.className = "r2v-section-item";
         item.style.setProperty("--section-color", SECTION_COLORS[name]);
@@ -480,7 +573,7 @@ export function createR2vSectionsEditor(options) {
         <div class="r2v-sections-stats">
             <div class="r2v-sections-stat">
                 <span>${t("r2v.sections.filled") || "已填"}:</span>
-                <span class="value" data-stat="filled">0/6</span>
+                <span class="value" data-stat="filled">0/${activeNames.length}</span>
             </div>
             <div class="r2v-sections-stat">
                 <span>${t("r2v.sections.words") || "词数"}:</span>
@@ -498,6 +591,25 @@ export function createR2vSectionsEditor(options) {
 
     // ─── Internal helpers ────────────────────────────────────────────────────
 
+    /** Keep only this editor's active sections (subset-safe: common=first 3, segment=last 3). */
+    function assignActive(src) {
+        const out = {};
+        for (const name of activeNames) out[name] = (src && src[name]) || "";
+        return out;
+    }
+
+    /** Replace sections (filtered to activeNames), refresh textareas + badges. */
+    function applySections(newSections) {
+        sections = assignActive(newSections);
+        for (const name of activeNames) {
+            const editor = sectionEditors[name];
+            if (editor) {
+                editor.textarea.value = sections[name] || "";
+                updateBadge(name, editor.badge);
+            }
+        }
+    }
+
     function updateBadge(name, badge) {
         const content = String(sections[name] || "").trim();
         const words = countWords(content);
@@ -512,11 +624,11 @@ export function createR2vSectionsEditor(options) {
     }
 
     function updateStats() {
-        const filled = SECTION_NAMES.filter(n => String(sections[n] || "").trim()).length;
-        const totalWords = SECTION_NAMES.reduce((sum, n) => sum + countWords(sections[n]), 0);
+        const filled = activeNames.filter(n => String(sections[n] || "").trim()).length;
+        const totalWords = activeNames.reduce((sum, n) => sum + countWords(sections[n]), 0);
         const filledEl = footer.querySelector('[data-stat="filled"]');
         const wordsEl = footer.querySelector('[data-stat="words"]');
-        if (filledEl) filledEl.textContent = `${filled}/6`;
+        if (filledEl) filledEl.textContent = `${filled}/${activeNames.length}`;
         if (wordsEl) wordsEl.textContent = String(totalWords);
     }
 
@@ -533,16 +645,7 @@ export function createR2vSectionsEditor(options) {
     function syncFromPrompt() {
         const text = typeof onGetPrompt === "function" ? onGetPrompt() : "";
         const parsed = parseR2vSections(text);
-        if (parsed) {
-            sections = { ...parsed };
-            for (const name of SECTION_NAMES) {
-                const editor = sectionEditors[name];
-                if (editor) {
-                    editor.textarea.value = sections[name] || "";
-                    updateBadge(name, editor.badge);
-                }
-            }
-        }
+        if (parsed) applySections(parsed);
     }
 
     function syncToPrompt() {
@@ -561,6 +664,26 @@ export function createR2vSectionsEditor(options) {
         }
     }
 
+    function insertTemplate() {
+        const hasCommon = activeNames.some(n => COMMON_SECTIONS.includes(n));
+        const hasSegment = activeNames.some(n => SEGMENT_SECTIONS.includes(n));
+        const template = generateR2vTemplate({
+            forCommon: hasCommon && !hasSegment,
+            forSegment: hasSegment && !hasCommon,
+            subjectCount: 1,
+            shotCount: 2,
+        });
+        applySections(template);
+        syncToPrompt();
+    }
+
+    function importScript() {
+        showR2vImportDialog((parsed) => {
+            applySections(parsed);
+            syncToPrompt();
+        });
+    }
+
     // ─── Event delegation ────────────────────────────────────────────────────
 
     panel.addEventListener("click", (e) => {
@@ -570,6 +693,8 @@ export function createR2vSectionsEditor(options) {
         if (action === "sync-from-prompt") syncFromPrompt();
         else if (action === "sync-to-prompt") syncToPrompt();
         else if (action === "split-to-director") splitToDirector();
+        else if (action === "insert-template") insertTemplate();
+        else if (action === "import-script") importScript();
     });
 
     // ─── Public API ──────────────────────────────────────────────────────────
@@ -582,16 +707,7 @@ export function createR2vSectionsEditor(options) {
         getSections: () => ({ ...sections }),
 
         /** Set sections and update UI. */
-        setSections: (newSections) => {
-            sections = { ...newSections };
-            for (const name of SECTION_NAMES) {
-                const editor = sectionEditors[name];
-                if (editor) {
-                    editor.textarea.value = sections[name] || "";
-                    updateBadge(name, editor.badge);
-                }
-            }
-        },
+        setSections: (newSections) => applySections(newSections),
 
         /** Validate and return status. */
         validate: () => validateR2vSections(sections),
@@ -607,6 +723,13 @@ export function createR2vSectionsEditor(options) {
             isCollapsed = collapsed;
             wrapper.classList.toggle("r2v-sections-collapsed", isCollapsed);
             toggle.classList.toggle("active", !isCollapsed);
+        },
+
+        /** Immediately flush any debounced sync (call before DOM teardown). */
+        flush: () => {
+            clearTimeout(syncTimer);
+            syncTimer = null;
+            syncToPrompt();
         },
     };
 }

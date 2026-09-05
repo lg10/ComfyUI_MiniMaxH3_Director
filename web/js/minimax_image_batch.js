@@ -36,6 +36,7 @@ import {
     safeUploadFilename,
 } from "./minimax_gen_timeline.js";
 import { refreshPromptTokenEditors, teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
+import { createR2vSectionsEditor, SEGMENT_SECTIONS } from "./minimax_r2v_sections.js";
 import { t } from "./minimax_i18n.js";
 import { createFl2vSlotPair, normalizeImageRef } from "./minimax_fl2v.js";
 import {
@@ -372,7 +373,13 @@ export function flushBatchPromptInputs(editor) {
     if (!list) return;
     const segs = editor?.timeline?.segments;
     if (!Array.isArray(segs) || !segs.length) return;
+    // r2v: six-section editors own seg.prompt — flush their debounced sync first.
+    list.querySelectorAll(".bd-r2v-sections-host").forEach((host) => {
+        host.__r2vSectionsEditor?.flush?.();
+    });
     list.querySelectorAll("textarea[data-batch-prompt-index]").forEach((el) => {
+        // r2v: plain textarea is hidden; seg.prompt already flushed from the editor.
+        if (el.dataset.batchR2vHidden === "1") return;
         el.__bdTokenApi?.sync?.();
         const live = liveBatchSegmentFromEl(editor, el, "data-batch-prompt-index");
         if (!live?.seg) return;
@@ -2814,6 +2821,34 @@ function appendBatchCard(list, editor, seg, index, ctx) {
                         : (live.refVideos || []),
                 };
             });
+
+            // r2v: replace the plain textarea with a six-section editor holding the
+            // last three sections (detailed_description / overall_soundscape /
+            // non_diegetic_music). The hidden textarea keeps mention wiring alive and
+            // mirrors the assembled text so flushBatchPromptInputs stays consistent.
+            promptEl.dataset.batchR2vHidden = "1";
+            promptEl.style.display = "none";
+            const sectionsHost = document.createElement("div");
+            sectionsHost.className = "bd-r2v-sections-host";
+            prompts.appendChild(sectionsHost);
+            const liveSeg = () => (editor.timeline.segments || []).find((s) => s?.id && s.id === segId)
+                || editor.timeline.segments?.[segIndex]
+                || seg;
+            const segSectionsEditor = createR2vSectionsEditor({
+                container: sectionsHost,
+                sectionNames: SEGMENT_SECTIONS,
+                onGetPrompt: () => liveSeg()?.prompt || "",
+                onSetPrompt: (text) => {
+                    const live = liveSeg();
+                    if (!live) return;
+                    live.prompt = text;
+                    promptEl.value = text;
+                    editor.scheduleTimelineSync();
+                    editor.writeExternalGroupPrompt?.(segIndex, live.prompt);
+                },
+            });
+            sectionsHost.__r2vSectionsEditor = segSectionsEditor;
+            segSectionsEditor?.refresh();
         }
 
         const preview = document.createElement("div");
