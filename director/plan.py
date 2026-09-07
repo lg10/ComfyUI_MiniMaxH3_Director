@@ -223,6 +223,7 @@ class DirectorPlan:
     auto_merge_segments: bool = True  # 分段导出 also pipes a single merged.mp4 (default ON)
     run_indices: frozenset[int] | None = None  # None = run all segments
     merge_only: bool = False  # 「仅合并缓存」: skip sampling, stream merged.mp4 from disk cache
+    continue_run: bool = False  # 「续运行」: sample only checked segments, but merge the FULL timeline (cache-fill unchecked)
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
@@ -601,6 +602,23 @@ def _resolve_merge_only(timeline: dict) -> bool:
     return bool(val)
 
 
+def _resolve_continue_run(timeline: dict) -> bool:
+    """「续运行」: run only checked groups, but merge the FULL timeline in order.
+
+    Implies run-select on the frontend (runSelectEnabled=true), so run_indices
+    already carries the checked subset; unchecked groups are cache-filled into
+    the merge. Mutually exclusive with「仅合并缓存」. Default OFF (opt-in).
+    """
+    val = timeline.get("continueRun")
+    if val is None:
+        val = timeline.get("continue_run")
+    if val is None:
+        return False
+    if isinstance(val, str):
+        return val.strip().lower() in {"1", "true", "on", "yes"}
+    return bool(val)
+
+
 def _clip_segment_ranges(
     ranges: list[tuple[int, int, dict]], export_total: int
 ) -> list[tuple[int, int, dict]]:
@@ -794,10 +812,15 @@ def build_director_plan(
     merge_method = _resolve_merge_method(output_block)
     auto_merge_segments = _resolve_segment_auto_merge(output_block)
     merge_only = _resolve_merge_only(timeline)
+    continue_run = _resolve_continue_run(timeline)
     if merge_only:
         # merge-only reads per-segment caches and needs the seg_export run dir,
         # which new_segment_mp4_run_dir only creates in "segments" mode.
         export_mode = "segments"
+    elif continue_run:
+        # 续运行 promises a single full-timeline merged.mp4 (unchecked groups
+        # cache-filled) — reuse the well-tested「全部导出」merge path verbatim.
+        export_mode = "all"
     out_w, out_h, ref_max, output_mode = resolve_output_dimensions(
         loaded_w or meta_w or int(width),
         loaded_h or meta_h or int(height),
@@ -909,6 +932,7 @@ def build_director_plan(
         auto_merge_segments=auto_merge_segments,
         run_indices=None if merge_only else _parse_run_selection(timeline, len(segments)),
         merge_only=merge_only,
+        continue_run=continue_run,
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
         global_ref_audios=global_ref_audios,
@@ -1027,6 +1051,11 @@ def plan_summary(plan: DirectorPlan) -> str:
             lines.append(
                 "Merge-only「仅合并缓存」: ON — 不采样/不生成，仅从磁盘缓存流式拼接 merged.mp4"
                 "（与「选择运行」互斥；缺缓存段跳过并报告）。"
+            )
+        if plan.continue_run:
+            lines.append(
+                "Continue-run「续运行」: ON — 只采样勾选段，按时间轴顺序合并全部段"
+                "（未勾选段用缓存回填；缺缓存段跳过并在报告中列出）。"
             )
         if plan.continuity_enabled:
             pinned = [

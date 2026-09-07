@@ -428,7 +428,10 @@ def build_plan_from_external_groups(
     cursor = 0
     for plan_idx, (src_index, g) in enumerate(all_indexed):
         group_prompt = (g.get("prompt") or "").strip()
-        if family == "r2v" and common_enabled:
+        # Full-six groups carry their own first three sections; skip the common
+        # prefix so they are not duplicated (mirrors gen_timeline.py).
+        group_full_six = bool(g.get("r2vFullSix") or g.get("r2v_full_six"))
+        if family == "r2v" and common_enabled and not group_full_six:
             prompt = concat_common_segment_prompt(fallback_prompt, group_prompt)
         else:
             prompt = group_prompt or fallback_prompt
@@ -614,6 +617,14 @@ def build_plan_from_external_groups(
         timeline, segment_count=len(segments)
     )
 
+    from .plan import _resolve_continue_run
+
+    continue_run = _resolve_continue_run(timeline)
+    if continue_run:
+        # 续运行 promises a single full-timeline merged.mp4 (unchecked groups
+        # cache-filled) — reuse the well-tested「全部导出」merge path verbatim.
+        export_mode = "all"
+
     return DirectorPlan(
         frame_rate=fps,
         total_frames=total or int(total_frames or 0),
@@ -633,6 +644,7 @@ def build_plan_from_external_groups(
         raw=raw,
         export_mode=export_mode,
         run_indices=run_indices,
+        continue_run=continue_run,
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
         global_ref_audios=list(common_audios_raw) if family == "r2v" else [],

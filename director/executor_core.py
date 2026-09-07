@@ -1950,6 +1950,24 @@ def execute_director_plan_core(
             "(勾选重跑或先全跑可补上)."
         )
 
+    if getattr(plan, "continue_run", False):
+        # run_indices is None when every segment is checked (== run all).
+        if run_indices is None:
+            sampled = sorted(int(s.index) + 1 for s in all_segments)
+        else:
+            sampled = sorted(int(i) + 1 for i in run_indices)
+        merged_order = sorted(int(s.index) + 1 for s in output_segments)
+        filled = [i for i in merged_order if i not in sampled]
+        reports.append(
+            f"续运行：本次采样 #{sampled}；缓存并入 #{filled}；"
+            f"合并顺序 #{merged_order} → merged.mp4"
+        )
+        if skipped_no_cache:
+            reports.append(
+                f"续运行：#{skipped_no_cache} 无可用缓存，未并入 merged.mp4"
+                "（请先运行该段，或将其一并纳入本次续运行）。"
+            )
+
     if not output_chunks and not segment_outputs:
         raise ValueError("Director plan produced no segments.")
 

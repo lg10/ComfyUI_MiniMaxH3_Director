@@ -49,14 +49,22 @@ export function reinforceR2vPrompt(prompt, media = {}) {
  * @param {string} opts.commonPrompt - timeline.global.prompt (first three sections)
  * @param {string} opts.segPrompt - group prompt (last three sections)
  * @param {boolean} opts.commonEnabled - whether 公共参数 is on
+ * @param {boolean} [opts.fullSix] - this group carries its OWN full six sections in
+ *      segPrompt (its first three were seeded from common). The common prefix is then
+ *      skipped so subject_definitions/summary/retention_analysis are not duplicated.
  * @param {{refs?: Array, videos?: Array, audios?: Array}} opts.media - already
  *      merged common + group, the same lists the @-menu is built from
  * @returns {string}
  */
-export function buildR2vFinalPrompt({ commonPrompt, segPrompt, commonEnabled, media }) {
-    const joined = commonEnabled
-        ? concatCommonSegmentPrompt(commonPrompt, segPrompt)
-        // gen_timeline.py falls back to `local_prompt or prompt`.
-        : (String(segPrompt ?? "").trim() || String(commonPrompt ?? "").trim());
+export function buildR2vFinalPrompt({ commonPrompt, segPrompt, commonEnabled, fullSix, media }) {
+    // A full-six group is self-contained: seg.prompt already holds all six sections,
+    // so do NOT prepend common (that would duplicate the first three). Mirrors
+    // gen_timeline.py, where a full-six segment skips concat_common_segment_prompt.
+    const joined = fullSix
+        ? String(segPrompt ?? "").trim()
+        : commonEnabled
+            ? concatCommonSegmentPrompt(commonPrompt, segPrompt)
+            // gen_timeline.py falls back to `local_prompt or prompt`.
+            : (String(segPrompt ?? "").trim() || String(commonPrompt ?? "").trim());
     return reinforceR2vPrompt(joined, media || {});
 }

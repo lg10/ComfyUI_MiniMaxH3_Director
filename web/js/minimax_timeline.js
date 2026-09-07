@@ -348,6 +348,7 @@ function sanitizeBatchWorkspace(ws) {
         runSelectEnabled: !!ws.runSelectEnabled,
         runSelection: Array.isArray(ws.runSelection) ? [...ws.runSelection] : [],
         mergeOnly: !!ws.mergeOnly,
+        continueRun: !!ws.continueRun,
         segments: ws.segments.map(sanitizeSegmentForPayload),
         globalCommon: sanitizeBatchGlobalCommon(ws.globalCommon),
     };
@@ -371,6 +372,7 @@ function sanitizeVideoWorkspace(ws) {
         runSelectEnabled: !!ws.runSelectEnabled,
         runSelection: Array.isArray(ws.runSelection) ? [...ws.runSelection] : [],
         mergeOnly: !!ws.mergeOnly,
+        continueRun: !!ws.continueRun,
         totalFrames: ws.totalFrames,
         frameRate: ws.frameRate,
         storageWidth: ws.storageWidth || 0,
@@ -1032,6 +1034,7 @@ const STYLES = `
 .bd-btn-sm{padding:3px 8px;font-size:10px}
 .bd-btn-run-select.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
 .bd-btn-merge-only.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
+.bd-btn-continue-run.active{background:#1a2a3a;color:#4fd0ff;border-color:#4fd0ff}
 .bd-output .bd-btn-live-preview{margin-left:auto;background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px}
 .bd-output .bd-btn-live-preview:hover{background:#2a2a2a;border-color:#555;color:#ddd}
 .bd-output .bd-btn-live-preview.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
@@ -1865,6 +1868,7 @@ function parseTimeline(raw, totalFrames, fps) {
         runSelectEnabled: false,
         runSelection: [],
         mergeOnly: false,
+        continueRun: false,
         liveTaePreview: false,
         batchDetailMode: "solo",
         segments: [{ id: uid(), start: 0, length: total, prompt: "", taskType: "", refs: [], refAudios: [], referenceVideo: {} }],
@@ -1969,7 +1973,9 @@ function parseTimeline(raw, totalFrames, fps) {
         data.runSelectEnabled = !!data.runSelectEnabled;
         data.runSelection = Array.isArray(data.runSelection) ? data.runSelection.map((i) => parseInt(i, 10)).filter((i) => i >= 0) : [];
         data.mergeOnly = data.mergeOnly === true || data.merge_only === true;
-        if (data.mergeOnly) { data.runSelectEnabled = false; data.runSelection = []; }
+        data.continueRun = data.continueRun === true || data.continue_run === true;
+        if (data.mergeOnly) { data.runSelectEnabled = false; data.runSelection = []; data.continueRun = false; }
+        if (data.continueRun) { data.runSelectEnabled = true; data.mergeOnly = false; }
         // Default off when missing. Explicit true keeps in-node TAE + segment playback.
         data.liveTaePreview = data.liveTaePreview === true || data.live_tae_preview === true;
         const detailMode = data.batchDetailMode ?? data.batch_detail_mode;
@@ -2721,6 +2727,7 @@ class MiniMaxH3DirectorEditor {
                     <button type="button" class="bd-btn" data-a="smart-split" data-i18n="toolbar.smartSplit" data-i18n-title="tooltip.smartSplit">智能分割</button>
                     <button type="button" class="bd-btn" data-a="run-select-toggle" data-i18n="toolbar.runSelect" data-i18n-title="tooltip.runSelect">选择运行</button>
                     <button type="button" class="bd-btn bd-btn-merge-only" data-a="merge-only-toggle" data-i18n="toolbar.mergeOnly" data-i18n-title="tooltip.mergeOnly">仅合并缓存</button>
+                    <button type="button" class="bd-btn bd-btn-continue-run" data-a="run-continue-toggle" data-i18n="toolbar.continueRun" data-i18n-title="tooltip.continueRun">续运行</button>
                     <label class="bd-run-select-all-wrap hidden" data-r="run-select-all-wrap" data-i18n-title="tooltip.runSelectAll">
                         <input type="checkbox" data-r="run-select-all-cb">
                         <span data-i18n="toolbar.selectAll">全选</span>
@@ -3202,6 +3209,7 @@ class MiniMaxH3DirectorEditor {
         this.runSelectSummary = this.root.querySelector('[data-r="run-select-summary"]');
         this.btnRunSelectToggle = this.root.querySelector('[data-a="run-select-toggle"]');
         this.btnMergeOnlyToggle = this.root.querySelector('[data-a="merge-only-toggle"]');
+        this.btnRunContinueToggle = this.root.querySelector('[data-a="run-continue-toggle"]');
         this.runSelectAllWrap = this.root.querySelector('[data-r="run-select-all-wrap"]');
         this.runSelectAllCb = this.root.querySelector('[data-r="run-select-all-cb"]');
 
@@ -3242,6 +3250,7 @@ class MiniMaxH3DirectorEditor {
         bind('[data-a="del-split"]', () => this.deleteSelectedSplitPoint());
         bind('[data-a="run-select-toggle"]', () => this.toggleRunSelectMode());
         bind('[data-a="merge-only-toggle"]', () => this.toggleMergeOnlyMode());
+        bind('[data-a="run-continue-toggle"]', () => this.toggleContinueRunMode());
         bind('[data-a="del"]', () => this.deleteSelectedSegment());
         bind('[data-a="mode-global"]', () => this.setEditMode("global"));
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
@@ -4031,6 +4040,7 @@ class MiniMaxH3DirectorEditor {
         this.timeline.runSelectEnabled = !this.timeline.runSelectEnabled;
         if (this.timeline.runSelectEnabled) {
             this.timeline.mergeOnly = false;
+            this.timeline.continueRun = false;
             if (!(this.timeline.runSelection || []).length) {
                 if (this.isFl2vMode()) {
                     this.timeline.runSelection = fl2vStartIndices(this);
@@ -4052,6 +4062,35 @@ class MiniMaxH3DirectorEditor {
         if (!this.supportsRunSelect()) return;
         this.timeline.mergeOnly = !this.timeline.mergeOnly;
         if (this.timeline.mergeOnly) {
+            this.timeline.runSelectEnabled = false;
+            this.timeline.runSelection = [];
+            this.timeline.continueRun = false;
+        }
+        this.updateRunSelectUI();
+        this.commit(false, { syncTimeline: true });
+        if (this.isImageBatch()) this.renderImageBatchGroups();
+        else this.scheduleRender();
+    }
+
+    /** 「续运行」: run only checked groups, but merge the FULL timeline in order
+     *  (unchecked groups cache-filled). Implies run-select; exclusive with merge-only. */
+    toggleContinueRunMode() {
+        if (!this.supportsRunSelect()) return;
+        this.timeline.continueRun = !this.timeline.continueRun;
+        if (this.timeline.continueRun) {
+            this.timeline.runSelectEnabled = true;
+            this.timeline.mergeOnly = false;
+            if (!(this.timeline.runSelection || []).length) {
+                if (this.isFl2vMode()) {
+                    this.timeline.runSelection = fl2vStartIndices(this);
+                } else {
+                    const n = this.getRunnableSegmentCount();
+                    this.timeline.runSelection = Array.from({ length: n }, (_, i) => i);
+                }
+            } else {
+                this.normalizeRunSelection();
+            }
+        } else {
             this.timeline.runSelectEnabled = false;
             this.timeline.runSelection = [];
         }
@@ -4083,11 +4122,15 @@ class MiniMaxH3DirectorEditor {
         const canRunSelect = this.supportsRunSelect();
         const mergeOnly = canRunSelect && !!this.timeline.mergeOnly;
         const enabled = this.isRunSelectEnabled() && canRunSelect && !mergeOnly;
+        // 「续运行」only in r2v: sample checked segments but always merge the full timeline.
+        const continueRun = canRunSelect && !!this.timeline.continueRun && !mergeOnly;
         // r2v uses timeline checkboxes (fl2v-style); other batch tasks use the card bar.
         const useBatchBar = this.isImageBatch() && canRunSelect && !this.isR2vBatch();
-        this.btnRunSelectToggle?.classList.toggle("active", enabled);
+        this.btnRunSelectToggle?.classList.toggle("active", enabled && !continueRun);
         this.btnRunSelectToggle?.classList.toggle("bd-btn-run-select", true);
         this.btnRunSelectToggle?.classList.toggle("hidden", !canRunSelect || useBatchBar);
+        this.btnRunContinueToggle?.classList.toggle("active", continueRun);
+        this.btnRunContinueToggle?.classList.toggle("hidden", !canRunSelect || useBatchBar || !this.isR2vBatch());
         this.btnMergeOnlyToggle?.classList.toggle("active", mergeOnly);
         this.btnMergeOnlyToggle?.classList.toggle("hidden", !canRunSelect || useBatchBar);
         this.batchRunSelectBtn?.classList.toggle("active", enabled);
@@ -4125,9 +4168,11 @@ class MiniMaxH3DirectorEditor {
             this.runSelectSummary.style.color = "#aaa";
         } else {
             const nums = (this.timeline.runSelection || []).map((i) => i + 1).join(", ");
-            const exportHint = this.timeline.output?.exportMode === "segments"
-                ? t("runSelect.exportOnlyChecked")
-                : t("runSelect.fillUnchecked");
+            const exportHint = continueRun
+                ? t("runSelect.continueHint")
+                : (this.timeline.output?.exportMode === "segments"
+                    ? t("runSelect.exportOnlyChecked")
+                    : t("runSelect.fillUnchecked"));
             this.runSelectSummary.textContent = count === 1
                 ? t("runSelect.sampleOne", { unit: label, nums, hint: exportHint })
                 : t("runSelect.sampleMany", { count, unit: label, nums, hint: exportHint });
@@ -4140,23 +4185,26 @@ class MiniMaxH3DirectorEditor {
         this.timeline.runSelectEnabled = false;
         this.timeline.runSelection = [];
         this.timeline.mergeOnly = false;
+        this.timeline.continueRun = false;
     }
 
     _runSelectionPayload() {
         const canRunSelect = this.supportsRunSelect();
         const mergeOnly = canRunSelect && !!this.timeline.mergeOnly;
         if (mergeOnly) {
-            return { runSelectEnabled: false, runSelection: [], mergeOnly: true };
+            return { runSelectEnabled: false, runSelection: [], mergeOnly: true, continueRun: false };
         }
+        const continueRun = canRunSelect && !!this.timeline.continueRun;
         // Never leak video-mode「选择运行」into i2v/batch (or vice versa).
         if (!canRunSelect || !this.timeline.runSelectEnabled) {
-            return { runSelectEnabled: false, runSelection: [], mergeOnly: false };
+            return { runSelectEnabled: false, runSelection: [], mergeOnly: false, continueRun: false };
         }
         this.normalizeRunSelection();
         return {
             runSelectEnabled: true,
             runSelection: [...(this.timeline.runSelection || [])],
             mergeOnly: false,
+            continueRun,
         };
     }
 
@@ -4274,6 +4322,7 @@ class MiniMaxH3DirectorEditor {
         this.timeline.editMode = ws.editMode || "global";
         this.timeline.runSelectEnabled = !!ws.runSelectEnabled;
         this.timeline.runSelection = Array.isArray(ws.runSelection) ? [...ws.runSelection] : [];
+        this.timeline.continueRun = !!ws.continueRun;
         const gc = ws.globalCommon || {};
         this.timeline.global = this.timeline.global || { refs: [] };
         this.timeline.global.commonEnabled = !!gc.commonEnabled;
@@ -4408,6 +4457,7 @@ class MiniMaxH3DirectorEditor {
             runSelection: Array.isArray(this.timeline.runSelection)
                 ? [...this.timeline.runSelection]
                 : [],
+            continueRun: !!this.timeline.continueRun,
             globalCommon: {
                 commonEnabled: !!g.commonEnabled,
                 commonCollapsed: !!g.commonCollapsed,
@@ -4425,6 +4475,7 @@ class MiniMaxH3DirectorEditor {
         this.timeline.editMode = ws.editMode || "segment";
         this.timeline.runSelectEnabled = !!ws.runSelectEnabled;
         this.timeline.runSelection = Array.isArray(ws.runSelection) ? [...ws.runSelection] : [];
+        this.timeline.continueRun = !!ws.continueRun;
         const gc = ws.globalCommon || {};
         this.timeline.global = this.timeline.global || { refs: [] };
         this.timeline.global.commonEnabled = !!gc.commonEnabled;
@@ -4493,6 +4544,7 @@ class MiniMaxH3DirectorEditor {
             editMode: this.timeline.editMode || "segment",
             runSelectEnabled: !!this.timeline.runSelectEnabled,
             runSelection: this.timeline.runSelection,
+            continueRun: !!this.timeline.continueRun,
             globalCommon: {
                 commonEnabled: !!g.commonEnabled,
                 commonCollapsed: !!g.commonCollapsed,
@@ -12678,12 +12730,20 @@ app.registerExtension({
             editor.flushTimelineSync?.();
             editor.clearLiveSamplePreview?.();
             if (editor.isImageBatch?.()) {
-                for (const seg of editor.timeline.segments || []) {
-                    seg.previewB64 = "";
-                    seg.previewFrames = [];
-                    seg.previewLive = false;
-                    seg.previewStep = null;
-                    seg.previewTotalSteps = null;
+                // Partial runs (选择运行/续运行) only re-sample the checked segments —
+                // those refresh via minimax_director_preview events. Unchecked segments
+                // are cache-filled on the backend and emit no preview, so keep their
+                // existing previews instead of blanking the whole timeline. 「仅合并缓存」
+                // re-samples nothing at all, so skip clearing entirely.
+                if (!editor.timeline?.mergeOnly) {
+                    (editor.timeline.segments || []).forEach((seg, idx) => {
+                        if (!editor.isSegmentRunEnabled?.(idx)) return;
+                        seg.previewB64 = "";
+                        seg.previewFrames = [];
+                        seg.previewLive = false;
+                        seg.previewStep = null;
+                        seg.previewTotalSteps = null;
+                    });
                 }
                 editor.renderImageBatchGroups?.();
             }

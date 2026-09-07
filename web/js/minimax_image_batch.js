@@ -37,9 +37,13 @@ import {
 } from "./minimax_gen_timeline.js";
 import { refreshPromptTokenEditors, teardownPromptImageMentions, wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
+    assembleR2vSections,
     buildR2vFinalPrompt,
+    concatCommonSegmentPrompt,
     createR2vFullPromptView,
     createR2vSectionsEditor,
+    parseR2vSections,
+    SECTION_NAMES,
     SEGMENT_SECTIONS,
 } from "./minimax_r2v_sections.js";
 import { t } from "./minimax_i18n.js";
@@ -531,6 +535,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-r2v-pick-existing{background:transparent;border:1px solid #3a3a3a;color:#c8c8c8;border-radius:6px;padding:2px 8px;font-size:10px;cursor:pointer;line-height:1.4;white-space:nowrap}
 .bd-r2v-pick-existing:hover{border-color:#4fff8f;color:#4fff8f}
 .bd-r2v-pick-existing:disabled{opacity:.4;cursor:not-allowed;border-color:#333;color:#666}
+.bd-r2v-fullsix-toggle{align-self:flex-start;margin:2px 0 0;white-space:normal;text-align:left;line-height:1.5;max-width:100%}
 .bd-r2v-common-inherit{border-style:dashed;border-color:#3a4a5a;background:#0a1218}
 .bd-r2v-common-inherit .bd-r2v-section-title{color:#9ab;text-transform:none;letter-spacing:.02em;font-size:11px}
 .bd-r2v-common-inherit .bd-batch-ref{cursor:default;border-color:#2a3a4a}
@@ -2846,50 +2851,121 @@ function appendBatchCard(list, editor, seg, index, ctx) {
             };
             wirePromptImageMentions(editor, promptEl, segMedia);
 
-            // r2v: the six-section editor (last three sections) is the only primary
-            // surface. The raw chip editor is folded behind a toggle; its edits write
-            // seg.prompt directly and are never parsed back into the sections.
+            // r2v: the six-section editor is the only primary surface. The raw chip
+            // editor is folded behind a toggle; its edits write seg.prompt directly
+            // and are never parsed back into the sections.
+            //
+            // By default a group owns the LAST three sections; the first three come
+            // from 公共参数 via concat_common_segment_prompt at generation time.
+            // 「展开更多」 flips this group to an INDEPENDENT full six sections: the
+            // first three are seeded from the current common prompt and become this
+            // group's own, and generation then skips the common prefix so they are
+            // not duplicated (seg.r2vFullSix). Use it when this group's scene/subjects
+            // differ from the shared common. See references/six-section-spec.md §8.
             promptEl.dataset.batchR2vHidden = "1";
             const sectionsHost = document.createElement("div");
             sectionsHost.className = "bd-r2v-sections-host";
             prompts.appendChild(sectionsHost);
+            // External-group mode executes from Group-node widgets, which carry only
+            // the prompt text — the r2vFullSix flag cannot round-trip there (the graph
+            // `groups` never sees timeline seg fields). An expanded, self-contained
+            // six-section prompt would then get the shared common re-prepended by
+            // build_plan_from_external_groups, duplicating the first three sections.
+            // So offer the toggle only in native timeline mode, where gen_timeline.py
+            // honours seg.r2vFullSix and skips the concat.
+            const canFullSix = !editor.hasExternalR2vGroups?.();
+            const fullSixBtn = document.createElement("button");
+            fullSixBtn.type = "button";
+            fullSixBtn.className = "bd-r2v-pick-existing bd-r2v-fullsix-toggle";
+            if (canFullSix) prompts.appendChild(fullSixBtn);
             const fullView = createR2vFullPromptView({
                 tokenWrap: promptEl.__bdTokenWrap || null,
                 getPreviewText: () => buildR2vFinalPrompt({
                     commonPrompt: editor.timeline?.global?.prompt || "",
                     segPrompt: liveSeg()?.prompt || "",
                     commonEnabled: !!editor.isR2vCommonEnabled?.(),
+                    fullSix: !!(liveSeg()?.r2vFullSix),
                     media: segMedia(),
                 }),
             });
             prompts.appendChild(fullView.root);
-            const segSectionsEditor = createR2vSectionsEditor({
-                container: sectionsHost,
-                sectionNames: SEGMENT_SECTIONS,
-                editorHost: editor,
-                getMedia: segMedia,
-                onGetPrompt: () => liveSeg()?.prompt || "",
-                onSetPrompt: (text) => {
-                    const live = liveSeg();
-                    if (!live) return;
-                    live.prompt = text;
-                    promptEl.value = text;
-                    // The sections just reasserted ownership of seg.prompt.
-                    delete promptEl.dataset.batchR2vRawEdited;
-                    editor.scheduleTimelineSync();
-                    editor.writeExternalGroupPrompt?.(segIndex, live.prompt);
-                    fullView.refreshPreview();
-                },
-            });
-            sectionsHost.__r2vSectionsEditor = segSectionsEditor;
-            // Cards are rebuilt from scratch, so parsing seg.prompt here is the only
-            // way to initialize — it is not a live reverse sync.
-            segSectionsEditor?.refresh();
+
+            // Build (or rebuild) the section editor for the group's current section
+            // set: last three normally, all six in independent full-six mode.
+            const buildSectionsEditor = () => {
+                const fullSix = !!(liveSeg()?.r2vFullSix);
+                const ed = createR2vSectionsEditor({
+                    container: sectionsHost,
+                    sectionNames: fullSix ? SECTION_NAMES : SEGMENT_SECTIONS,
+                    editorHost: editor,
+                    getMedia: segMedia,
+                    onGetPrompt: () => liveSeg()?.prompt || "",
+                    onSetPrompt: (text) => {
+                        const live = liveSeg();
+                        if (!live) return;
+                        live.prompt = text;
+                        promptEl.value = text;
+                        // The sections just reasserted ownership of seg.prompt.
+                        delete promptEl.dataset.batchR2vRawEdited;
+                        editor.scheduleTimelineSync();
+                        editor.writeExternalGroupPrompt?.(segIndex, live.prompt);
+                        fullView.refreshPreview();
+                    },
+                });
+                sectionsHost.__r2vSectionsEditor = ed;
+                // Cards are rebuilt from scratch, so parsing seg.prompt here is the
+                // only way to initialize — it is not a live reverse sync.
+                ed?.refresh();
+            };
+            buildSectionsEditor();
+
+            const labelFullSixBtn = () => {
+                const on = !!(liveSeg()?.r2vFullSix);
+                fullSixBtn.textContent = on
+                    ? (t("batch.r2vFullSixCollapse") || "收起前三段（用公共）")
+                    : (t("batch.r2vFullSixExpand") || "展开更多 · 本组独立六段");
+                fullSixBtn.title = t("batch.r2vFullSixHint")
+                    || "展开后本组自带 subject_definitions / summary / retention_analysis（从公共预填），生成时不再拼接公共前三段以免重复；适用于本组场景/主体与公共不同的剧情。";
+            };
+            labelFullSixBtn();
+            fullSixBtn.onclick = (e) => {
+                e.stopPropagation();
+                const live = liveSeg();
+                if (!live) return;
+                // Capture any in-flight section edits into seg.prompt first.
+                sectionsHost.__r2vSectionsEditor?.flush?.();
+                if (!live.r2vFullSix) {
+                    // Expand → seed this group's first three from the common prompt.
+                    const common = editor.timeline?.global?.prompt || "";
+                    live.prompt = concatCommonSegmentPrompt(common, live.prompt || "");
+                    live.r2vFullSix = true;
+                } else {
+                    // Collapse → keep only this group's last three sections.
+                    const parsed = parseR2vSections(live.prompt || "");
+                    if (parsed) {
+                        const keep = {};
+                        for (const n of SEGMENT_SECTIONS) keep[n] = parsed[n] || "";
+                        live.prompt = assembleR2vSections(keep);
+                    }
+                    live.r2vFullSix = false;
+                }
+                promptEl.value = live.prompt;
+                delete promptEl.dataset.batchR2vRawEdited;
+                // Rebuild the editor for the new section set (already flushed above,
+                // so destroy without a second flush).
+                sectionsHost.__r2vSectionsEditor?.destroy?.({ flush: false });
+                buildSectionsEditor();
+                labelFullSixBtn();
+                editor.scheduleTimelineSync();
+                editor.writeExternalGroupPrompt?.(segIndex, live.prompt);
+                fullView.refreshPreview();
+            };
+
             promptEl.addEventListener("input", () => {
                 promptEl.dataset.batchR2vRawEdited = "1";
                 // Same invariant on the editor itself, so flush() is a no-op even if
                 // some other path calls it without checking the dataset flag.
-                segSectionsEditor?.noteRawEdit?.(promptEl.value);
+                sectionsHost.__r2vSectionsEditor?.noteRawEdit?.(promptEl.value);
                 fullView.refreshPreview();
             });
         }

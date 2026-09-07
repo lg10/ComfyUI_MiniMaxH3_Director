@@ -358,6 +358,7 @@ def build_gen_director_plan(
         _load_ref_videos,
         _load_refs,
         _parse_run_selection,
+        _resolve_continue_run,
         _resolve_export_mode,
         _resolve_merge_only,
         concat_common_segment_prompt,
@@ -448,8 +449,13 @@ def build_gen_director_plan(
     # Needs the seg_export run dir, which new_segment_mp4_run_dir only creates in
     # "segments" mode — force it regardless of the UI export-mode widget.
     merge_only = _resolve_merge_only(timeline)
+    continue_run = _resolve_continue_run(timeline)
     if merge_only:
         export_mode = "segments"
+    elif continue_run:
+        # 续运行 promises a single full-timeline merged.mp4 (unchecked groups
+        # cache-filled) — reuse the well-tested「全部导出」merge path verbatim.
+        export_mode = "all"
 
     if submode == "gen_blank":
         source_clips = []
@@ -504,8 +510,14 @@ def build_gen_director_plan(
             )
             seg_task_key_preview = resolve_task_key(seg_task)
             local_prompt = (seg_data.get("prompt") or "").strip()
+            # A full-six group carries its OWN first three sections in local_prompt
+            # (seeded from common in the UI). Prepending the shared common would
+            # duplicate subject_definitions/summary/retention_analysis, so skip it.
+            seg_full_six = bool(
+                seg_data.get("r2vFullSix") if isinstance(seg_data, dict) else False
+            )
             # r2v/r2i + commonEnabled: shared prompt prefixes each group prompt.
-            if seg_task_key_preview in ("r2v", "r2i") and common_enabled:
+            if seg_task_key_preview in ("r2v", "r2i") and common_enabled and not seg_full_six:
                 seg_prompt = concat_common_segment_prompt(prompt, local_prompt)
             else:
                 seg_prompt = local_prompt or prompt
@@ -682,6 +694,7 @@ def build_gen_director_plan(
         raw=raw,
         export_mode=export_mode,
         merge_only=merge_only,
+        continue_run=continue_run,
         run_indices=None if merge_only else _parse_run_selection(timeline, len(segments)),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
